@@ -2,6 +2,19 @@
 
 **English** | [繁體中文](README.zh-TW.md)
 
+This app was made so that **users without Discord Nitro** can also enjoy a soundboard and add more fun to playing with friends. Key features:
+
+- **Your own soundboard, with no length limit**: Just put audio files in a folder and use them, without Discord's soundboard length limit
+- **Instant replay recording and editing**: Capture the last few minutes of audio at any time and trim it directly into a new sound, making it faster and easier to create sounds
+- **Join sound**: A feature normally reserved for Discord Nitro users, which you can also set up in this app, playing automatically when you join a voice channel
+- **Mixer**: Send the audio of programs that are currently playing, such as music or a Podcast, directly through voice chat to the people you are talking with
+- **Microphone noise suppression**: Processes only your microphone audio, without affecting the sounds or the Mixer audio
+
+> ⚠️ **Note: Please turn off Discord's built-in "Automatically determine input sensitivity" and "Noise Suppression"**, otherwise Discord will filter out the sounds and the Mixer audio.
+> After turning them off, enable Soundboard's "🔇 Microphone noise suppression" to get results similar to Discord's built-in noise suppression (see "Discord Setup" below).
+
+## How It Works
+
 A Discord-style soundboard for Windows desktops. The app lists the audio files in a folder as buttons, and a single click does **both** of the following at the same time:
 
 1. Plays the sound through your headphones (monitoring)
@@ -177,7 +190,8 @@ Open **Discord → User Settings → Voice & Video**:
 - Leave the output device as your usual headphones
 - **Turn off Discord's "Noise Suppression" (both Krisp and Standard)**, otherwise the sounds will be filtered out as noise;
   let Soundboard's "🔇 Microphone noise suppression" handle noise such as keyboard sounds instead (see below). Noise suppression only processes the microphone audio and does not affect the sounds
-- Set "Input Mode" to "Voice Activity" and lower the sensitivity, or use "Push to Talk" (sounds are only sent while you hold the key)
+- When "Input Mode" is set to "Voice Activity", **turn off "Automatically determine input sensitivity"** and lower the sensitivity manually, otherwise the sounds and the Mixer audio may be cut off;
+  alternatively, use "Push to Talk" (sounds are only sent while you hold the key)
 
 Settings are saved automatically in `%APPDATA%\Soundboard\settings.json`, so you do not need to set things up again the next time you open the app.
 
