@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soundboard"
+version = "0.1.0"
+description = "Discord 風格的音效版：把音效同時播給自己聽並送進虛擬麥克風"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12",
+]
+
+[project.optional-dependencies]
+# 系統沒有 ffmpeg 時，用這個套件附帶的 ffmpeg 來解碼 m4a / aac / wma 等格式
+ffmpeg = ["imageio-ffmpeg>=0.4.9"]
+dev = ["pytest>=7"]
+# 打包成 exe：python packaging/build_exe.py
+build = ["pyinstaller>=6", "pillow>=10"]
+
+[project.scripts]
+soundboard = "soundboard.__main__:main"
+
+[project.gui-scripts]
+soundboard-gui = "soundboard.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# 麥克風降噪用的 RNNoise DLL 與授權檔；介面翻譯檔
+soundboard = ["_vendor/*", "locales/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

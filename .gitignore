@@ -1,0 +1,36 @@
+# 建置產物（python packaging/build_exe.py）
+build/
+dist/
+release/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# 個人音效與壓縮檔：音效檔不放進儲存庫
+*.rar
+*.zip
+*.7z
+*.ogg
+*.oga
+*.mp3
+*.wav
+*.flac
+*.opus
+*.m4a
+*.aac
+*.wma
+*.aif
+*.aiff
+音效/
+
+# 紀錄檔與編輯器
+*.log
+.vscode/
+.idea/
+.claude/
