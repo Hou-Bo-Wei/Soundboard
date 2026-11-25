@@ -381,16 +381,20 @@ class ScrollArea(tk.Frame):
     """可垂直捲動的區域：把元件放在 :attr:`inner` 裡。"""
 
     def __init__(self, parent: tk.Misc, *, bg: str, border: int = 0,
-                 on_resize: Callable[[int], None] | None = None) -> None:
+                 on_resize: Callable[[int], None] | None = None,
+                 on_scroll: Callable[[], None] | None = None) -> None:
         """
         Args:
             parent (tk.Misc): 父元件。
             bg (str): 底色。
             border (int): 外框粗細（預覽模式用綠框提示）。
             on_resize (Callable[[int], None] | None): 可視寬度改變時呼叫（參數為新寬度）。
+            on_scroll (Callable[[], None] | None): 捲動位置改變時呼叫（虛擬捲動用）。
         """
         super().__init__(parent, bg=bg)
         self._on_resize = on_resize
+        self._on_scroll = on_scroll
+        self._virtual_height: int | None = None
         self.canvas = tk.Canvas(self, bg=bg, bd=0, highlightthickness=border,
                                 highlightbackground=bg, highlightcolor=bg)
         self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview,
@@ -400,9 +404,25 @@ class ScrollArea(tk.Frame):
         self.canvas.pack(side="left", fill="both", expand=True)
         self.inner = tk.Frame(self.canvas, bg=bg)
         self._window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.inner.bind("<Configure>",
-                        lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")), add="+")
+        self.inner.bind("<Configure>", lambda _e: self._update_region(), add="+")
         self.canvas.bind("<Configure>", self._on_canvas_configure, add="+")
+
+    def set_virtual_height(self, height: int | None) -> None:
+        """改用指定的總高度當捲動範圍（虛擬捲動：內容由呼叫端直接畫在 :attr:`canvas` 上，不放進 :attr:`inner`）。
+
+        Tk 的單一元件高度上限約 32767 像素，幾千張貼圖的清單比這更高，所以內容必須畫在 Canvas 上。
+
+        Args:
+            height (int | None): 總高度（像素）；None 恢復成依 :attr:`inner` 的大小捲動。
+        """
+        self._virtual_height = height
+        self._update_region()
+
+    def _update_region(self) -> None:
+        if self._virtual_height is None:
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        else:
+            self.canvas.configure(scrollregion=(0, 0, max(1, self.canvas.winfo_width()), self._virtual_height))
 
     def contains(self, widget: tk.Misc | None) -> bool:
         """某個元件是否位於這個捲動區內。
@@ -437,6 +457,8 @@ class ScrollArea(tk.Frame):
 
     def _on_yscroll(self, first: str, last: str) -> None:
         self.scrollbar.set(first, last)
+        if self._on_scroll is not None:
+            self._on_scroll()
         idle = float(first) <= 0.0 and float(last) >= 1.0
         style = "Idle.Thin.Vertical.TScrollbar" if idle else "Thin.Vertical.TScrollbar"
         if self.scrollbar.cget("style") != style:

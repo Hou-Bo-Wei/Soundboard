@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -124,12 +125,16 @@ def scan_stickers(folder: Path) -> list[StickerItem]:
     if not folder.is_dir():
         return []
     items: list[StickerItem] = []
-    for path in folder.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in STICKER_EXTENSIONS:
-            continue
-        rel = path.relative_to(folder)
-        items.append(StickerItem(key=rel.as_posix(), path=path, name=path.stem, series=rel.parent.as_posix()
-                                 if rel.parent != Path(".") else ""))
+    # os.walk 讀目錄時順便拿到檔案類型，比 rglob 再對每個檔案 stat 一次快很多（幾千張時差好幾倍）
+    for current, _dirs, names in os.walk(folder):
+        series = Path(current).relative_to(folder).as_posix()
+        series = "" if series == "." else series
+        for filename in names:
+            if os.path.splitext(filename)[1].lower() not in STICKER_EXTENSIONS:
+                continue
+            key = f"{series}/{filename}" if series else filename
+            items.append(StickerItem(key=key, path=Path(current) / filename, name=os.path.splitext(filename)[0],
+                                     series=series))
     items.sort(key=lambda it: (natural_key(it.series), natural_key(it.name)))
     return items
 
@@ -144,6 +149,19 @@ def natural_key(text: str) -> list[object]:
         list[object]: 排序鍵。
     """
     return [int(part) if part.isdigit() else part.casefold() for part in re.split(r"(\d+)", text)]
+
+
+def series_title(series: str) -> str:
+    """系列資料夾的顯示名稱：去掉 LINE 貼圖下載器加在資料夾名稱後面的編號（``名稱_11155948``），子資料夾用 ``›`` 連接。
+
+    Args:
+        series (str): 相對路徑（以 ``/`` 分隔）。
+
+    Returns:
+        str: 顯示用的名稱。
+    """
+    parts = [re.sub(r"_[0-9a-fA-F]{5,}$", "", part) or part for part in series.split("/") if part]
+    return " › ".join(parts)
 
 
 def default_sticker_dir(base: Path) -> Path:

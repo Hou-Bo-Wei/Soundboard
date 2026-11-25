@@ -299,3 +299,25 @@ def test_old_settings_file_still_loads_and_webhook_roundtrips(tmp_path: Path) ->
     again = load_settings(path)
     assert again.discord_webhooks == {"頻道": VALID_URL} and again.sticker_send_size == 240
     assert isinstance(again, AppSettings)
+
+
+def test_series_title_strips_line_downloader_ids() -> None:
+    assert stickers.series_title("") == ""
+    assert stickers.series_title("變種吉娃娃_971070/Me就…修但幾勒!_11155948") == "變種吉娃娃 › Me就…修但幾勒!"
+    assert stickers.series_title("胖鯊魚鯊西米★表情貼_600d2bcda7e30f08e738f1ad") == "胖鯊魚鯊西米★表情貼"
+    assert stickers.series_title("我的貼圖") == "我的貼圖"          # 沒有編號就保持原樣
+    assert stickers.series_title("_123456") == "_123456"           # 整個名稱都是編號時不要變成空字串
+
+
+def test_scan_is_fast_and_recursive_for_thousands(tmp_path: Path) -> None:
+    import time
+
+    for series in range(3):
+        folder = tmp_path / f"系列{series}_12345{series}" / "子"
+        folder.mkdir(parents=True)
+        for i in range(300):
+            (folder / f"{i:03d}.png").write_bytes(b"x")
+    start = time.perf_counter()
+    items = stickers.scan_stickers(tmp_path)
+    assert len(items) == 900 and time.perf_counter() - start < 3
+    assert items[0].series == "系列0_123450/子" and items[0].key == "系列0_123450/子/000.png"

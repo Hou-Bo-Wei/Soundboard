@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import bisect
 import logging
 import os
 import queue
 import subprocess
 import sys
+import threading
 import tkinter as tk
+from collections import OrderedDict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -42,6 +46,11 @@ DRAIN_MS = 60               # 多久檢查一次背景執行緒做好的縮圖
 ANIM_FALLBACK_MS = 100
 FLASH_MS = 350
 MIN_SEARCH_WIDTH = 260
+HEADER_HEIGHT = 30
+THUMB_CACHE_SIZE = 1500     # 最多快取幾張縮圖（每張約 40 KB）
+DRAIN_BATCH = 16            # 每次最多處理幾張縮圖，避免一口氣塞滿而讓介面卡住
+IMPORT_CHUNK = 25           # 匯入時每複製幾個檔案更新一次進度
+BUFFER_SCREENS = 0.75       # 畫面上下各多準備幾個螢幕高度的貼圖，捲動時才不會看到空白
 
 
 def send_size_label(edge: int) -> str:
@@ -93,6 +102,7 @@ class StickerTile(tk.Canvas):
         super().__init__(parent, bg=SURFACE, highlightthickness=0, bd=0, width=width, height=height,
                          cursor="hand2", takefocus=0)
         self.item = item
+        self.window_id = 0      # 這張貼圖在 canvas 上的視窗項目編號（由頁面設定）
         self._center = (width / 2, (height - caption_h) / 2)
         self.info: stickers.StickerInfo | None = None
         self.photo: tk.PhotoImage | None = None
@@ -174,20 +184,28 @@ class StickersPage(tk.Frame):
         self.app = app
         m = app.metrics
         self.actions = StickerActions(app)
-        self.items: list[stickers.StickerItem] = []
-        self.tiles: dict[str, StickerTile] = {}
-        self._infos: dict[str, stickers.StickerInfo | None] = {}
-        self._section_widgets: list[tk.Widget] = []
-        self._columns = 0
-        self._configured_columns = 0
-        self._generation = 0
         self._tile_w = m.px(TILE_WIDTH)
         self._gap = m.px(TILE_GAP)
         self._pad = m.px(PAGE_PADDING)
         self._box = m.px(THUMB_BOX)
+        self.items: list[stickers.StickerItem] = []
+        self.tiles: dict[str, StickerTile] = {}
+        # 縮圖快取：key → (PhotoImage 或 None, 貼圖資訊, 是否讀取失敗)；只快取看過的，上限 THUMB_CACHE_SIZE
+        self._thumbs: OrderedDict[str, tuple[tk.PhotoImage | None, stickers.StickerInfo | None, bool]] = OrderedDict()
+        self._pending: set[str] = set()
+        # 虛擬捲動：只為畫面附近的列建立元件。列 = ("header", 文字) 或 ("tiles", [貼圖…])，_row_tops 是各列的 y
+        self._rows: list[tuple[str, object]] = []
+        self._row_tops: list[int] = []
+        self._headers: dict[int, int] = {}      # 列編號 → canvas 文字項目
+        self._hint: int | None = None
+        self._columns = 0
+        self._generation = 0
+        self._importing = False
+        self._measure = None
+        self._tile_h = self._box + m.px(CAPTION_HEIGHT) + m.px(20)
         self._loaded = False
         # 縮圖由背景執行緒做（讀檔與縮放），PhotoImage 一律在主執行緒建立
-        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thumb")
+        self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="thumb")
         self._ready: queue.Queue[tuple] = queue.Queue()
         self._pillow_ok = self._check_pillow()
         self._build_header()
@@ -268,10 +286,9 @@ class StickersPage(tk.Frame):
         self.count_label.grid(row=0, column=1, padx=(m.px(10), 0))
 
     def _build_grid(self) -> None:
-        self.scroll = ScrollArea(self, bg=SURFACE, on_resize=lambda _w: self.layout())
+        self.scroll = ScrollArea(self, bg=SURFACE, on_resize=lambda _w: self.layout(), on_scroll=self._update_visible)
         m = self.app.metrics
         self.scroll.pack(fill="both", expand=True, padx=(self._pad - self._gap, m.px(6)), pady=(0, m.px(6)))
-        self.grid_frame = self.scroll.inner
 
     # ================================================================== Discord 設定
     def refresh_discord(self) -> None:
@@ -336,32 +353,53 @@ class StickersPage(tk.Frame):
         exts = " ".join(f"*{e}" for e in sorted(stickers.STICKER_EXTENSIONS))
         chosen = filedialog.askopenfilenames(title=tr("選擇要匯入的貼圖"),
                                              filetypes=[(tr("圖片"), exts), (tr("所有檔案"), "*.*")])
-        self._import([(Path(p), self.folder) for p in chosen])
+        if chosen:
+            dest = self.folder
+            self._start_import(lambda: [(Path(p), dest) for p in chosen])
 
     def import_folder(self) -> None:
-        """選擇資料夾（例如 LINE 貼圖下載器的一個系列），連同子資料夾結構複製進貼圖資料夾。"""
+        """選擇資料夾（例如 LINE 貼圖下載器的一個系列），連同子資料夾結構複製進貼圖資料夾。
+
+        幾千張貼圖的資料夾光是列出檔案就要幾秒，所以整個流程（列出、複製）都在背景做。
+        """
         chosen = filedialog.askdirectory(title=tr("選擇要匯入的貼圖資料夾"))
         if not chosen:
             return
-        source = Path(chosen)
-        files = [(p, self.folder / source.name / p.parent.relative_to(source))
-                 for p in sorted(source.rglob("*")) if p.is_file() and p.suffix.lower() in stickers.STICKER_EXTENSIONS]
-        self._import(files)
+        source, dest = Path(chosen), self.folder / Path(chosen).name
 
-    def _import(self, files: list[tuple[Path, Path]]) -> None:
-        folder = self.folder.resolve()
-        # 來源已經在貼圖資料夾裡就不用複製（否則會產生一堆「(2)」重複檔）
-        files = [(s, d) for s, d in files if folder not in s.resolve().parents]
-        if not files:
-            self.app.set_status(tr("沒有可匯入的貼圖（支援 PNG／GIF／WebP／APNG／JPG）"), WARN)
+        def collect() -> list[tuple[Path, Path]]:
+            return [(p, dest / p.parent.relative_to(source)) for p in sorted(source.rglob("*"))
+                    if p.is_file() and p.suffix.lower() in stickers.STICKER_EXTENSIONS]
+
+        self._start_import(collect)
+
+    def _start_import(self, collect: Callable[[], list[tuple[Path, Path]]]) -> None:
+        if self._importing:
+            self.app.set_status(tr("正在匯入中，請等它完成"), WARN)
             return
+        self._importing = True
+        self.app.set_status(tr("⏳ 正在整理要匯入的貼圖…"), FG_MUTED)
+        threading.Thread(target=self._import_worker, args=(collect, self.folder), daemon=True,
+                         name="sticker-import").start()
+
+    def _import_worker(self, collect: Callable[[], list[tuple[Path, Path]]], target: Path) -> None:
+        """在背景列出並複製檔案（成千上萬張時不能卡住介面），完成後交回主執行緒重新整理。"""
+        post = self.app.post_message
+        count = 0
+        error: OSError | None = None
         try:
-            count = self.actions.import_files(files)
+            # 來源已經在貼圖資料夾裡就不用複製（否則會產生一堆「(2)」重複檔）；用字串比對，不逐一解析路徑
+            root = os.path.normcase(os.path.abspath(target)) + os.sep
+            files = [(s, d) for s, d in collect() if not os.path.normcase(os.path.abspath(s)).startswith(root)]
+            total = len(files)
+            if not files:
+                post("status", f"{WARN}|" + tr("沒有可匯入的貼圖（支援 PNG／GIF／WebP／APNG／JPG）"))
+            for i in range(0, total, IMPORT_CHUNK):
+                count += self.actions.import_files(files[i:i + IMPORT_CHUNK])
+                post("status", f"{FG_MUTED}|" + tr("⏳ 匯入貼圖中… {done} / {total}", done=count, total=total))
         except OSError as exc:
-            self.app.set_status(tr("匯入貼圖失敗：{error}", error=exc), ERR)
-            return
-        self.rescan()
-        self.app.set_status(tr("已匯入 {count} 張貼圖", count=count), OK)
+            error = exc
+        self._ready.put(("imported", count, "", error, None))
 
     # ================================================================== 掃描與縮圖
     def on_show(self) -> None:
@@ -370,46 +408,58 @@ class StickersPage(tk.Frame):
             self.rescan()
 
     def rescan(self) -> None:
-        """重新掃描貼圖資料夾並重建縮圖牆。"""
+        """重新掃描貼圖資料夾（在背景做，幾千張也不卡），完成後重新排版。"""
         self._loaded = True
         folder = self.folder
         self.folder_label.configure(text=str(folder))
         self._generation += 1
-        self.items = stickers.scan_stickers(folder)
-        self.rebuild_tiles()
+        generation = self._generation
+        self._thumbs.clear()
+        self._pending.clear()
+        self.app.set_status(tr("⏳ 正在讀取貼圖資料夾…"), FG_MUTED)
+
+        def scan() -> None:
+            self._ready.put(("scanned", generation, "", stickers.scan_stickers(folder), None))
+
+        self._executor.submit(scan)
+
+    def _finish_scan(self, items: list[stickers.StickerItem]) -> None:
+        self.items = items
+        for key in list(self.tiles):
+            self._drop_tile(key)
+        self.layout(force=True)
         if self.items and not self._pillow_ok:
             self.app.set_status(tr("貼圖功能需要 Pillow 套件，請執行：pip install pillow"), ERR)
         else:
             self.app.set_status(tr("已載入 {count} 張貼圖", count=len(self.items)), OK if self.items else WARN)
 
-    def rebuild_tiles(self) -> None:
-        """依目前的貼圖清單重建所有縮圖按鈕，並在背景產生縮圖。"""
+    def _make_tile(self, item: stickers.StickerItem) -> StickerTile:
         from tkinter import font as tkfont
 
         m = self.app.metrics
-        for tile in self.tiles.values():
-            tile.destroy()
-        self.tiles.clear()
-        self._infos.clear()
-        width = self._tile_w - 2 * self._gap
-        height = self._box + m.px(CAPTION_HEIGHT) + m.px(20)
-        measure = tkfont.Font(font=FONT_SMALL).measure
-        generation = self._generation
-        for item in self.items:
-            tile = StickerTile(self.grid_frame, item, width=width, height=height, box=self._box, radius=m.px(10),
-                               caption_h=m.px(CAPTION_HEIGHT), font_measure=measure)
-            tile.bind("<ButtonRelease-1>", lambda e, t=tile: self._on_release(e, t), add="+")
-            tile.bind("<Button-3>", lambda e, it=item: self._show_menu(e, it))
-            tile.bind("<Enter>", lambda _e, t=tile: self._on_enter(t), add="+")
-            tile.bind("<Leave>", lambda _e, t=tile: self._on_leave(t), add="+")
-            self.tiles[item.key] = tile
-            if self._pillow_ok:
-                self._executor.submit(self._thumb_job, item, generation)
-        self.layout(force=True)
+        if self._measure is None:
+            self._measure = tkfont.Font(font=FONT_SMALL).measure
+        tile = StickerTile(self.scroll.canvas, item, width=self._tile_w - 2 * self._gap, height=self._tile_h,
+                           box=self._box, radius=m.px(10), caption_h=m.px(CAPTION_HEIGHT), font_measure=self._measure)
+        tile.bind("<ButtonRelease-1>", lambda e, t=tile: self._on_release(e, t), add="+")
+        tile.bind("<Button-3>", lambda e, it=item: self._show_menu(e, it))
+        tile.bind("<Enter>", lambda _e, t=tile: self._on_enter(t), add="+")
+        tile.bind("<Leave>", lambda _e, t=tile: self._on_leave(t), add="+")
+        self.tiles[item.key] = tile      # 先登記再送出縮圖工作：工作開始時會確認這張還在畫面上
+        cached = self._thumbs.get(item.key)
+        if cached is not None:
+            self._thumbs.move_to_end(item.key)
+            tile.set_image(cached[0], cached[1], failed=cached[2])
+        elif self._pillow_ok and item.key not in self._pending:
+            self._pending.add(item.key)
+            self._executor.submit(self._thumb_job, item, self._generation)
+        return tile
 
     def _thumb_job(self, item: stickers.StickerItem, generation: int) -> None:
-        if generation != self._generation:
-            return      # 已經重新掃描：這份結果沒人要了
+        if generation != self._generation or item.key not in self.tiles:
+            # 已經重新掃描、或這張已經捲出畫面：不用做了（捲回來時會再要求）
+            self._pending.discard(item.key)
+            return
         try:
             info = stickers.inspect_sticker(item.path)
             image = stickers.load_thumbnail(item.path, self._box)
@@ -427,29 +477,50 @@ class StickersPage(tk.Frame):
         self._ready.put(("anim", token, item.key, frames, None))
 
     def _drain(self) -> None:
-        """在主執行緒把背景做好的縮圖轉成 PhotoImage 放上去。"""
-        if not self._pillow_ok:
-            self._drain_job = self.after(DRAIN_MS, self._drain)
-            return
-        from PIL import ImageTk
+        """在主執行緒處理背景送回的結果：縮圖轉成 PhotoImage、動畫影格、匯入完成。"""
+        delay = DRAIN_MS
+        try:
+            from PIL import ImageTk
+        except ImportError:
+            ImageTk = None      # 沒有 Pillow：仍要處理掃描與匯入，只是沒有縮圖
 
         try:
-            while True:
+            for _ in range(DRAIN_BATCH):
                 kind, tag, key, payload, info = self._ready.get_nowait()
-                tile = self.tiles.get(key)
-                if tile is None:
-                    continue
-                if kind == "thumb" and tag == self._generation:
-                    self._infos[key] = info
-                    tile.set_image(None if payload is None else ImageTk.PhotoImage(payload), info,
-                                   failed=payload is None)
-                elif kind == "anim" and tag == tile.hover_token and tile.hovering and payload:
-                    tile.start_animation([(ImageTk.PhotoImage(img), duration) for img, duration in payload])
+                delay = 15      # 還有東西要處理就快一點回來，但每次只做一小批
+                if kind == "scanned":
+                    if tag == self._generation:
+                        self._finish_scan(payload)
+                elif kind == "imported":
+                    self._finish_import(tag, info if info is not None else payload)
+                elif kind == "thumb" and tag == self._generation and ImageTk is not None:
+                    self._pending.discard(key)
+                    photo = None if payload is None else ImageTk.PhotoImage(payload)
+                    self._thumbs[key] = (photo, info, payload is None)
+                    while len(self._thumbs) > THUMB_CACHE_SIZE:
+                        self._thumbs.popitem(last=False)
+                    tile = self.tiles.get(key)
+                    if tile is not None:
+                        tile.set_image(photo, info, failed=payload is None)
+                elif kind == "anim" and ImageTk is not None:
+                    tile = self.tiles.get(key)
+                    if tile is not None and tag == tile.hover_token and tile.hovering and payload:
+                        tile.start_animation([(ImageTk.PhotoImage(img), duration) for img, duration in payload])
         except queue.Empty:
             pass
         except tk.TclError:
             return      # 視窗關閉中
-        self._drain_job = self.after(DRAIN_MS, self._drain)
+        self._drain_job = self.after(delay, self._drain)
+
+    def _finish_import(self, count: int, error: OSError | None) -> None:
+        self._importing = False
+        if count == 0 and error is None:
+            return      # 沒有東西匯入：保留 worker 已經顯示的說明
+        self.rescan()
+        if error is not None:
+            self.app.set_status(tr("匯入貼圖失敗（已匯入 {count} 張）：{error}", count=count, error=error), ERR)
+        else:
+            self.app.set_status(tr("已匯入 {count} 張貼圖", count=count), OK)
 
     def shutdown(self) -> None:
         """程式結束時停止背景工作。"""
@@ -528,56 +599,105 @@ class StickersPage(tk.Frame):
         return [it for it in self.items if query in it.name.casefold() or query in it.series.casefold()]
 
     def layout(self, force: bool = False) -> None:
-        """依視窗寬度與搜尋條件重新排列縮圖（依系列分區）。
+        """依視窗寬度與搜尋條件計算每一列的位置（依系列分區），再補上畫面附近的貼圖。
+
+        只為「看得到的那幾列」建立元件（虛擬捲動），幾千張貼圖也能瞬間開啟。
 
         Args:
             force (bool): 欄數沒變也要重排（內容有變動時）。
         """
         columns = grid_columns(self.scroll.canvas.winfo_width(), self._tile_w)
         if columns == self._columns and not force:
+            self._update_visible()
             return
         self._columns = columns
         m = self.app.metrics
-        for tile in self.tiles.values():
-            tile.grid_forget()
-        for widget in self._section_widgets:
-            widget.destroy()
-        self._section_widgets.clear()
-
+        row_h = self._tile_h + 2 * self._gap
         visible = self._visible_items()
-        series_names = list(dict.fromkeys(it.series for it in visible))
-        show_headers = len(series_names) > 1 or (series_names and series_names[0] != "")
-        row = 0
-        for series in series_names:
-            members = [it for it in visible if it.series == series]
+        by_series: dict[str, list[stickers.StickerItem]] = {}
+        for item in visible:
+            by_series.setdefault(item.series, []).append(item)
+        show_headers = len(by_series) > 1 or (bool(by_series) and "" not in by_series)
+        rows: list[tuple[str, object]] = []
+        tops: list[int] = []
+        y = 0
+        for series, members in by_series.items():
             if show_headers:
-                header = tk.Label(self.grid_frame, text=f"{series or tr('（根目錄）')}　{len(members)}", font=FONT_BOLD,
-                                  bg=SURFACE, fg=FG_MUTED, anchor="w")
-                header.grid(row=row, column=0, columnspan=columns, sticky="we", padx=self._gap,
-                            pady=(m.px(14) if row else m.px(2), m.px(2)))
-                self._section_widgets.append(header)
-                row += 1
-            for i, item in enumerate(members):
-                self.tiles[item.key].grid(row=row + i // columns, column=i % columns, padx=self._gap,
-                                          pady=self._gap, sticky="nsew")
-            row += (len(members) + columns - 1) // columns
+                tops.append(y)
+                rows.append(("header", f"{stickers.series_title(series) or tr('（根目錄）')}　{len(members)}"))
+                y += m.px(HEADER_HEIGHT)
+            for i in range(0, len(members), columns):
+                tops.append(y)
+                rows.append(("tiles", members[i:i + columns]))
+                y += row_h
+        self._rows, self._row_tops = rows, tops
+        # 清掉舊的標題與提示；貼圖元件留著，_update_visible 會重新定位或回收
+        canvas = self.scroll.canvas
+        for item_id in self._headers.values():
+            canvas.delete(item_id)
+        self._headers.clear()
+        if self._hint is not None:
+            canvas.delete(self._hint)
+            self._hint = None
         if not visible:
-            self._section_widgets.append(self._empty_hint(row, columns))
-        for c in range(columns):
-            self.grid_frame.columnconfigure(c, minsize=self._tile_w - 2 * self._gap, weight=1)
-        for c in range(columns, self._configured_columns):
-            self.grid_frame.columnconfigure(c, minsize=0, weight=0)
-        self._configured_columns = max(columns, self._configured_columns)
+            self._hint = self._empty_hint()
+            y = m.px(200)
+        self.scroll.set_virtual_height(max(1, y))
         self.count_label.configure(text=tr("{shown} / {total} 張貼圖", shown=len(visible), total=len(self.items)))
         self.scroll.canvas.yview_moveto(0)
+        self._update_visible()
 
-    def _empty_hint(self, row: int, columns: int) -> tk.Label:
+    def _update_visible(self) -> None:
+        """依目前捲動位置，建立／定位畫面附近的貼圖與標題，回收離得很遠的。"""
+        if not self._row_tops:
+            for key in list(self.tiles):
+                self._drop_tile(key)
+            return
+        canvas = self.scroll.canvas
+        view_h = max(canvas.winfo_height(), 1)
+        top = canvas.canvasy(0) - view_h * BUFFER_SCREENS
+        bottom = canvas.canvasy(0) + view_h * (1 + BUFFER_SCREENS)
+        first = max(0, bisect.bisect_right(self._row_tops, top) - 1)
+        last = bisect.bisect_right(self._row_tops, bottom)
+        m = self.app.metrics
+        wanted: dict[str, tuple[stickers.StickerItem, int, int]] = {}
+        headers: set[int] = set()
+        for index in range(first, min(last, len(self._rows))):
+            kind, content = self._rows[index]
+            y = self._row_tops[index]
+            if kind == "header":
+                headers.add(index)
+                if index not in self._headers:
+                    self._headers[index] = canvas.create_text(
+                        self._gap + m.px(4), y + m.px(HEADER_HEIGHT) - m.px(4), text=content, font=FONT_BOLD,
+                        fill=FG_MUTED, anchor="sw")
+            else:
+                for col, item in enumerate(content):
+                    wanted[item.key] = (item, col * self._tile_w + self._gap, y + self._gap)
+        for key in [k for k in self.tiles if k not in wanted]:
+            self._drop_tile(key)
+        for index in [i for i in self._headers if i not in headers]:
+            canvas.delete(self._headers.pop(index))
+        for key, (item, x, y) in wanted.items():
+            tile = self.tiles.get(key)
+            if tile is None:
+                tile = self._make_tile(item)
+                tile.window_id = canvas.create_window(x, y, window=tile, anchor="nw")
+            else:
+                canvas.coords(tile.window_id, x, y)
+
+    def _drop_tile(self, key: str) -> None:
+        tile = self.tiles.pop(key)
+        self.scroll.canvas.delete(tile.window_id)
+        tile.destroy()
+
+    def _empty_hint(self) -> int:
         if self.search_var.get().strip():
             text = tr("找不到符合「{query}」的貼圖", query=self.search_var.get().strip())
         else:
             text = tr("此資料夾中沒有貼圖\n"
                       "按一下「➕ 匯入貼圖」加入圖片，或按「📁 選擇資料夾」選擇已有貼圖的資料夾"
                       "（例如 LINE 貼圖下載器的輸出資料夾）")
-        hint = tk.Label(self.grid_frame, text=text, bg=SURFACE, fg=FG_SUBTLE, font=FONT_BODY, justify="center")
-        hint.grid(row=row, column=0, columnspan=columns, pady=self.app.metrics.px(60))
-        return hint
+        canvas = self.scroll.canvas
+        return canvas.create_text(max(canvas.winfo_width(), 1) / 2, self.app.metrics.px(60), text=text,
+                                  fill=FG_SUBTLE, font=FONT_BODY, justify="center", anchor="n")

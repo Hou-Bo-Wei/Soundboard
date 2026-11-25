@@ -416,6 +416,7 @@ You can save several webhooks (for example for different servers) and switch the
 - Or click "📁 Choose folder" and point it at a folder that already contains stickers, such as the output folder of a LINE sticker downloader (one folder per series; the page groups stickers by series)
 - The default sticker folder is "貼圖" next to the sound folder (you can also drop files in and click "🔄 Refresh")
 - Supported: `.png` (including APNG), `.gif`, `.webp` (including animated), `.jpg`
+- With a very large collection (thousands of stickers), prefer "📁 Choose folder" pointed at the original folder over "Import": importing copies every file (a minute or two for thousands; you can keep using the app meanwhile), while choosing a folder is instant and uses no extra disk space. The thumbnail wall only loads the stickers near the viewport, so thousands of stickers stay smooth
 
 **Using it**
 
