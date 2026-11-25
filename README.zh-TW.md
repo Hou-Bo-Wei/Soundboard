@@ -393,7 +393,7 @@ python -m soundboard --mic-test
 
 ### 🖼 貼圖（一鍵傳送到 Discord 頻道）
 
-把喜歡的貼圖（例如用「LINE 貼圖下載器」存下來的透明背景 PNG／GIF／APNG／WebP）放進貼圖資料夾，在「🖼 貼圖」頁按一下就能傳到指定的 Discord 頻道；動態貼圖會自動轉成會動的 GIF。
+把喜歡的貼圖（例如用本專案附的「LINE 貼圖下載器」[`tools/line_sticker_dl`](tools/line_sticker_dl) 存下來的透明背景 PNG／GIF／APNG／WebP）放進貼圖資料夾，在「🖼 貼圖」頁按一下就能傳到指定的 Discord 頻道；動態貼圖會自動轉成會動的 GIF。
 
 **運作方式與取捨**：程式透過 Discord 的 **Webhook** 上傳圖片。Webhook 不需要建立機器人、不需要登入 Discord，也不會違反服務條款；
 代價是訊息會以「Webhook 的名稱」發送（可在設定視窗自訂「傳送者名稱」），而不是你本人的帳號。若想以**自己的身分**傳送（包含私訊），

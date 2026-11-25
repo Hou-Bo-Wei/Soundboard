@@ -393,7 +393,7 @@ This method requires no Discord login and does not violate Discord's Terms of Se
 
 ### 🖼 Stickers (Send to a Discord Channel with One Click)
 
-Put your favorite stickers (for example transparent PNG / GIF / APNG / WebP files saved with a "LINE sticker downloader") into the sticker folder, then click one on the "🖼 Stickers" page to post it to a Discord channel. Animated stickers are converted to animated GIFs automatically.
+Put your favorite stickers (for example transparent PNG / GIF / APNG / WebP files saved with the "LINE sticker downloader" included in this repository, [`tools/line_sticker_dl`](tools/line_sticker_dl)) into the sticker folder, then click one on the "🖼 Stickers" page to post it to a Discord channel. Animated stickers are converted to animated GIFs automatically.
 
 **How it works and the trade-off**: the app uploads the image through a Discord **webhook**. A webhook needs no bot account, no Discord login and doesn't violate the Terms of Service;
 the price is that the message is posted under the *webhook's name* (you can set a "Sender name" in the settings window) rather than your own account. To send **as yourself** (including DMs),
