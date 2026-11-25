@@ -29,7 +29,7 @@ Sounds ────────────────────────�
 Physical mic ──> Noise suppression ───────────────┴─(mix)─> CABLE Output ──> Discord "Input Device"
 ```
 
-Current version: **0.2** (shown in the sidebar and under "⚙ Settings → ℹ About").
+Current version: **0.3** (shown in the sidebar and under "⚙ Settings → ℹ About").
 
 ---
 
@@ -128,7 +128,7 @@ The window is divided into the following areas:
 
 | Area | Contents |
 |---|---|
-| **Left navigation bar** | Switches between the five pages: "🏠 Home", "🖼 Stickers", "⏺ Instant replay", "🎚 Mixer" and "⚙ Settings". A yellow ⚠ appears next to "⚙ Settings" when there is a problem with your settings. The app name and version (`Soundboard v0.2`) are shown at the top. The **Status** area at the bottom always shows "Virtual mic: active" / "Virtual mic: not enabled" and the "Discord voice" state; it shows "Preview mode: local monitor only" when preview mode is on, and sources such as "Instant replay: Discord" when instant replay is on (click a status to jump to the corresponding page) |
+| **Left navigation bar** | Switches between the five pages: "🏠 Home", "🖼 Stickers", "⏺ Instant replay", "🎚 Mixer" and "⚙ Settings". A yellow ⚠ appears next to "⚙ Settings" when there is a problem with your settings. The app name and version (`Soundboard v0.3`) are shown at the top. The **Status** area at the bottom always shows "Virtual mic: active" / "Virtual mic: not enabled" and the "Discord voice" state; it shows "Preview mode: local monitor only" when preview mode is on, and sources such as "Instant replay: Discord" when instant replay is on (click a status to jump to the corresponding page) |
 | **🏠 Home** | The sounds themselves: a search box, sound buttons divided into groups, and the common actions: 📁 Choose folder, 🔄 Refresh, 🗂 New group, ⌨ Hotkeys, 🪟 Floating window, 🎧 Preview, ⏹ Stop all |
 | **🖼 Stickers** | A wall of sticker thumbnails (grouped by series): click one to copy it to the clipboard; keyword search, text stickers, and sending stickers or text via Webhook — see "🖼 Stickers" below |
 | **⏺ Instant replay** | Continuously records the last few minutes of audio from several sources (your microphone, Discord, YouTube, etc.). Click "Capture" to save it as a multitrack clip, which you can then pick tracks from, adjust the volume of, and trim into a new sound |
@@ -765,7 +765,7 @@ Notes:
 - The exe version writes its error log to `%APPDATA%\Soundboard\soundboard.log`
   (rewritten at every launch; **when you reopen the app after it exited abnormally**, the previous log is in `soundboard.prev.log` in the same folder, and the state at the moment of the abnormal exit is recorded there too)
 - After changing the code, run `python packaging/build_exe.py` again to produce a new version
-- The version number is defined as `__version__` in `src/soundboard/__init__.py` (currently `"0.2.0"`, displayed on screen as `0.2`)
+- The version number is defined as `__version__` in `src/soundboard/__init__.py` (currently `"0.3.0"`, displayed on screen as `0.3`)
 
 ---
 

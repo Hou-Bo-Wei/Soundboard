@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "soundboard"
-version = "0.2.0"
+version = "0.3.0"
 description = "Discord 風格的音效版：把音效同時播給自己聽並送進虛擬麥克風"
 readme = "README.md"
 requires-python = ">=3.10"
