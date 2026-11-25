@@ -12,6 +12,8 @@ dependencies = [
     "numpy>=1.24",
     "sounddevice>=0.4.6",
     "soundfile>=0.12",
+    # 貼圖：縮圖、讀取 APNG／WebP、把動態貼圖轉成 GIF
+    "pillow>=10",
 ]
 
 [project.optional-dependencies]

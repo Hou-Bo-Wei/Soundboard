@@ -80,6 +80,8 @@ def run_pyinstaller() -> Path:
         # sounddevice / soundfile 的 DLL（PortAudio、libsndfile）由 pyinstaller-hooks-contrib 自動收集
         "--collect-data", "_sounddevice_data",
         "--collect-data", "_soundfile_data",
+        # 貼圖縮圖用的 PIL.ImageTk 是在函式內才匯入，明確列出以免漏打包
+        "--hidden-import", "PIL.ImageTk",
         "--distpath", str(DIST_DIR),
         "--workpath", str(BUILD_DIR / "pyinstaller"),
         "--specpath", str(BUILD_DIR),

@@ -35,6 +35,7 @@ from soundboard.gui.mixer_page import MASTER, MONITOR, SOUNDS, MixerPage
 from soundboard.gui.presenters import voice_status
 from soundboard.gui.replay_page import ReplayPage
 from soundboard.gui.settings_page import SettingsPage
+from soundboard.gui.stickers_page import StickersPage
 from soundboard.gui.styles import FONT_BRAND, FONT_SMALL, FONT_SMALL_BOLD, Metrics, setup_style
 from soundboard.gui.widgets import RoundedButton
 from soundboard.i18n import N_, SOURCE_LANGUAGE, current_language, tr
@@ -59,7 +60,7 @@ MIN_SIZE = (860, 560)
 # 只標記：模組載入時還沒決定介面語言，建立狀態列時才 tr
 STATUS_HINT = N_("左鍵：傳送給通話對象並監聽　Shift＋左鍵：試聽（僅本機）　Ctrl＋左鍵：複選　"
                  "右鍵：更多選項　Ctrl+P：試聽模式　Esc：全部停止")
-PAGES = ("home", "replay", "mixer", "settings")
+PAGES = ("home", "stickers", "replay", "mixer", "settings")
 
 
 class SoundboardApp:
@@ -120,6 +121,7 @@ class SoundboardApp:
         setup_style(root, self.metrics)
         self._build_shell()
         self.home = HomePage(self.content, self)
+        self.stickers_page = StickersPage(self.content, self)
         self.settings_page = SettingsPage(self.content, self)
         self.replay_page = ReplayPage(self.content, self)
         self.mixer_page = MixerPage(self.content, self)
@@ -188,8 +190,8 @@ class SoundboardApp:
         tk.Label(brand, text=subtitle, font=FONT_SMALL, bg=SIDEBAR, fg=FG_SUBTLE, anchor="w").pack(fill="x")
 
         self._nav: dict[str, RoundedButton] = {}
-        for page, text in (("home", tr("🏠   首頁")), ("replay", tr("⏺   回放錄音")), ("mixer", tr("🎚   混音器")),
-                           ("settings", tr("⚙   設定"))):
+        for page, text in (("home", tr("🏠   首頁")), ("stickers", tr("🖼   貼圖")), ("replay", tr("⏺   回放錄音")),
+                           ("mixer", tr("🎚   混音器")), ("settings", tr("⚙   設定"))):
             btn = RoundedButton(sidebar, text, lambda p=page: self.show_page(p), surface=SIDEBAR, bg=SIDEBAR,
                                 hover=NAV_HOVER, layout="row", subfg=WARN, subfont=FONT_SMALL_BOLD,
                                 radius=m.px(6), padx=m.px(12), pady=m.px(8))
@@ -252,8 +254,8 @@ class SoundboardApp:
         if page == self._page:
             return
         self._page = page
-        for name, frame in (("home", self.home), ("replay", self.replay_page), ("mixer", self.mixer_page),
-                            ("settings", self.settings_page)):
+        for name, frame in (("home", self.home), ("stickers", self.stickers_page), ("replay", self.replay_page),
+                            ("mixer", self.mixer_page), ("settings", self.settings_page)):
             if name == page:
                 frame.pack(fill="both", expand=True)
             else:
@@ -265,6 +267,8 @@ class SoundboardApp:
                 btn.set_colors(SIDEBAR, NAV_HOVER)
         if page == "mixer":
             self.mixer_page.on_show()
+        if page == "stickers":
+            self.stickers_page.on_show()
         if page == "settings" and hasattr(self, "tray"):
             # 使用者可能在工作管理員停用了開機項目，每次打開設定頁都重新讀一次
             self.settings_page.update_background_ui()
@@ -634,7 +638,7 @@ class SoundboardApp:
         except KeyError:
             # 游標在 ttk 下拉選單的清單上：那是 Tk 內部視窗，tkinter 找不到對應物件
             return
-        for area in (self.home.scroll, self.replay_page.scroll, self.mixer_page.scroll,
+        for area in (self.home.scroll, self.stickers_page.scroll, self.replay_page.scroll, self.mixer_page.scroll,
                      self.settings_page.scroll):
             if area.contains(widget):
                 area.scroll(int(-event.delta / 120))
@@ -762,6 +766,7 @@ class SoundboardApp:
         self.hotkeys.stop()
         self._voice_watcher.stop()
         self.replay_page.shutdown()
+        self.stickers_page.shutdown()
         self.app_router.stop()
         mic_test = self.settings_page.mic_test
         if mic_test is not None:

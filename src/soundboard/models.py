@@ -134,6 +134,12 @@ class AppSettings:
         mixer_volumes (dict[str, float]): 混音器音量倍率；key 為執行檔名稱（小寫）或 ``@master``（總音量）。
         mixer_muted (list[str]): 混音器中靜音的通道：執行檔名稱（小寫）、``@master``、``@sounds``。
         language (str): 介面語言代碼（``zh_TW``／``en``／``ja``／``ko``），空字串表示跟隨系統。
+        sticker_dir (str): 貼圖資料夾；空字串表示用預設（音效資料夾旁的「貼圖」）。
+        discord_webhooks (dict[str, str]): 已儲存的 Discord Webhook（自訂名稱 → 網址）。
+            網址等同頻道的發言密碼，只存在使用者自己的設定檔，不要提交到 git。
+        discord_webhook_active (str | None): 目前用來傳貼圖的 Webhook 名稱。
+        discord_username (str): 傳貼圖時顯示的發送者名稱；空字串用 Webhook 本身的名稱。
+        sticker_send_size (int): 傳送前把貼圖縮到長邊幾像素；0 表示原始大小。
     """
 
     sound_dir: str = ""
@@ -175,6 +181,25 @@ class AppSettings:
     mixer_volumes: dict[str, float] = field(default_factory=dict)
     mixer_muted: list[str] = field(default_factory=list)
     language: str = ""
+    sticker_dir: str = ""
+    discord_webhooks: dict[str, str] = field(default_factory=dict)
+    discord_webhook_active: str | None = None
+    discord_username: str = ""
+    sticker_send_size: int = 0
+
+    def active_webhook(self) -> tuple[str, str] | None:
+        """目前要用來傳貼圖的 Webhook。
+
+        Returns:
+            tuple[str, str] | None: （名稱, 網址）；沒有選擇時用第一個，一個都沒有時為 None。
+        """
+        if self.discord_webhook_active in self.discord_webhooks:
+            name = self.discord_webhook_active
+        elif self.discord_webhooks:
+            name = next(iter(self.discord_webhooks))
+        else:
+            return None
+        return name, self.discord_webhooks[name]
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> AppSettings:
