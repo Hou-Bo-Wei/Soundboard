@@ -47,6 +47,16 @@ python line_sticker_dl.py
 
 靜態貼圖一律只存 PNG。已存在的檔案會略過，所以中斷後重跑可以接續。
 
+### 文字貼圖與 `line_meta.json`
+
+LINE 的**訊息貼圖**（每張可以自己打字）與**「隨你填」名字貼圖**也能下載：主圖存成 `001.png`（訊息貼圖疊上預設文字；
+名字貼圖的名字位置是「****」），沒有字的底圖等輔助檔放在隱藏的 `.line` 資料夾。每個系列資料夾另外寫一份 `line_meta.json`
+（貼圖 ID、預設文字、文字貼圖的底圖與文字 API），音效版的「🖼 貼圖」頁用它來**套用自己輸入的文字**與**搜尋關鍵字**。
+舊版下載的資料夾，把同一個網址再下載一次即可補上（已存在的貼圖會略過）。
+
+Message stickers and custom-name stickers can be downloaded too. Each series folder gets a `line_meta.json`
+(sticker IDs, default text, base images in the hidden `.line` folder) that Soundboard uses to apply your own text and keywords.
+
 > 傳到 Discord 時，音效版會自動把 APNG／WebP 轉成會動的 GIF，所以只存 APNG 原檔也可以。
 
 ### 命令列
@@ -67,5 +77,4 @@ LINE貼圖\
 ## 限制
 
 - 只能抓 LINE Store 公開的貼圖組，區域限定、已下架的可能抓不到。
-- 自訂名字貼圖沒有實際圖檔，會顯示「這組沒有可下載的貼圖」，作者頁整批下載時會自動跳過。
 - 這是非官方工具，LINE 改版網頁後可能需要調整。

@@ -9,7 +9,7 @@ This app was made so that **users without Discord Nitro** can also enjoy a sound
 - **Join sound**: A feature normally reserved for Discord Nitro users, which you can also set up in this app, playing automatically when you join a voice channel
 - **Mixer**: Send the audio of programs that are currently playing, such as music or a Podcast, directly through voice chat to the people you are talking with
 - **Microphone noise suppression**: Processes only your microphone audio, without affecting the sounds or the Mixer audio
-- **Stickers**: Put LINE stickers and other PNG / GIF / WebP / APNG images in a folder and post them to a Discord channel with one click (animated stickers are converted to animated GIFs automatically)
+- **Stickers**: Put LINE stickers and other PNG / GIF / WebP / APNG images in a folder and click one to copy it, then press Ctrl+V in Discord to send it (animated stickers are converted to animated GIFs automatically); you can give stickers **keywords** so typing a word pops up the matching stickers; and LINE message stickers and name stickers can **apply the text you type directly**
 
 > ⚠️ **Note: Please turn off Discord's built-in "Automatically determine input sensitivity" and "Noise Suppression"**, otherwise Discord will filter out the sounds and the Mixer audio.
 > After turning them off, enable Soundboard's "🔇 Microphone noise suppression" to get results similar to Discord's built-in noise suppression (see "Discord Setup" below).
@@ -130,7 +130,7 @@ The window is divided into the following areas:
 |---|---|
 | **Left navigation bar** | Switches between the five pages: "🏠 Home", "🖼 Stickers", "⏺ Instant replay", "🎚 Mixer" and "⚙ Settings". A yellow ⚠ appears next to "⚙ Settings" when there is a problem with your settings. The app name and version (`Soundboard v0.2`) are shown at the top. The **Status** area at the bottom always shows "Virtual mic: active" / "Virtual mic: not enabled" and the "Discord voice" state; it shows "Preview mode: local monitor only" when preview mode is on, and sources such as "Instant replay: Discord" when instant replay is on (click a status to jump to the corresponding page) |
 | **🏠 Home** | The sounds themselves: a search box, sound buttons divided into groups, and the common actions: 📁 Choose folder, 🔄 Refresh, 🗂 New group, ⌨ Hotkeys, 🪟 Floating window, 🎧 Preview, ⏹ Stop all |
-| **🖼 Stickers** | A wall of sticker thumbnails (grouped by series): click one to post it to a Discord channel; 📁 Choose folder, ➕ Import stickers, ⚙ Webhook settings — see "🖼 Stickers" below |
+| **🖼 Stickers** | A wall of sticker thumbnails (grouped by series): click one to copy it to the clipboard; keyword search, text stickers, and sending stickers or text via Webhook — see "🖼 Stickers" below |
 | **⏺ Instant replay** | Continuously records the last few minutes of audio from several sources (your microphone, Discord, YouTube, etc.). Click "Capture" to save it as a multitrack clip, which you can then pick tracks from, adjust the volume of, and trim into a new sound |
 | **🎚 Mixer** | All volumes in one place: faders for master, sounds, microphone and monitor, plus the ability to send the audio of apps such as Chrome and Spotify to the people in your call |
 | **⚙ Settings** | Divided into six cards: 🎧 Audio devices, 🎙 Microphone and noise suppression, 🚪 Join sound, 🖥 Startup and background, 🌐 Language, ℹ About (adjust volume in "🎚 Mixer") |
@@ -391,24 +391,11 @@ This method requires no Discord login and does not violate Discord's Terms of Se
 - Clicking "Test Mic" in Discord's settings is also treated as joining a voice channel
 - Switching directly between voice channels (for example from your own channel to another one) also plays the sound; a brief disconnection and reconnection within 3 seconds plays it only once, to avoid repeated playback when the network is unstable
 
-### 🖼 Stickers (Send to a Discord Channel with One Click)
+### 🖼 Stickers (Click to Copy, Press Ctrl+V in Discord to Send)
 
-Put your favorite stickers (for example transparent PNG / GIF / APNG / WebP files saved with the "LINE sticker downloader" included in this repository, [`tools/line_sticker_dl`](tools/line_sticker_dl)) into the sticker folder, then click one on the "🖼 Stickers" page to post it to a Discord channel. Animated stickers are converted to animated GIFs automatically.
-
-**How it works and the trade-off**: the app uploads the image through a Discord **webhook**. A webhook needs no bot account, no Discord login and doesn't violate the Terms of Service;
-the price is that the message is posted under the *webhook's name* (you can set a "Sender name" in the settings window) rather than your own account. To send **as yourself** (including DMs),
-right-click a sticker → "📋 Copy to clipboard", then press `Ctrl+V` in the Discord message box.
-
-**First-time setup: create a webhook**
-
-1. In the Discord channel where stickers should go (you need the "Manage Webhooks" permission; your own server or a private channel works): ⚙ Edit Channel → Integrations → Webhooks → New Webhook → Copy Webhook URL
-2. In Soundboard click "🖼 Stickers" on the left → "⚙ Webhook settings…", enter a name, paste the URL and click "Save"
-3. Click "Send test message"; when "✅ Soundboard sticker connection test succeeded" shows up in the channel, you're done
-
-You can save several webhooks (for example for different servers) and switch the target with the drop-down at the top of the Stickers page.
-
-> 🔒 **A webhook URL works like a password for posting in that channel**: it is stored only in `%APPDATA%\Soundboard\settings.json` on your own computer, never in the source code or the repository, and the screen and log file only show a masked URL.
-> Don't share the settings file or the URL; if it ever leaks, delete that webhook under Integrations in the Discord channel settings to invalidate it.
+Put your favorite stickers (for example transparent PNG / GIF / APNG / WebP files saved with the "LINE sticker downloader" included in this repository, [`tools/line_sticker_dl`](tools/line_sticker_dl)) into the sticker folder,
+then **click a sticker on the "🖼 Stickers" page to copy it to the clipboard**, and press `Ctrl+V` in the Discord message box to send it **as yourself** (channels and DMs both work).
+PNG and GIF are put on the clipboard as "files", so a pasted GIF still animates; APNG and animated WebP are first converted to animated GIFs automatically.
 
 **Adding stickers**
 
@@ -422,19 +409,57 @@ You can save several webhooks (for example for different servers) and switch the
 
 | Action | Description |
 |---|---|
-| Left-click | Posts it to the selected Discord channel; the status bar shows "✅ Sent …" or the reason it failed |
+| Left-click | **Copies it to the clipboard**; press `Ctrl+V` in Discord to send it. The status bar shows "📋 Copied …" |
 | Hover a sticker marked ▶ | Plays a preview of the animation |
-| Right-click | Send, 📋 Copy to clipboard, 📂 Show in File Explorer, 🗑 Delete (to the Recycle Bin) |
-| Search box | Filters by sticker name or series name |
-| Send size | Shrinks the sticker to a longest side of 320 / 240 / 160 / 120 px before sending (default: original size; never enlarged). Smaller stickers look more like emotes in chat and give smaller files |
+| Right-click | 📋 Copy, ✏ Enter text and copy… (text stickers), 📤 Send to Discord via Webhook, 🏷 Edit keywords…, 📂 Show in File Explorer, 🗑 Delete (to the Recycle Bin) |
+| Search box | After you type text: ① stickers matching a **keyword** come first (the 💡 section) ② **text stickers** apply the text you typed directly ③ stickers whose name or series matches |
+| Sticker size | Shrinks the sticker to a longest side of 320 / 240 / 160 / 120 px before copying or sending (default: original size; never enlarged). Smaller stickers look more like emotes in chat and give smaller files |
+
+**🏷 Keywords (type a word and the matching stickers pop up)**
+
+Right-click a sticker → "🏷 Edit keywords…" and enter a few words (separated by commas or spaces, e.g. `hello, hi`). After that, type "hello" (or "hello everyone") in the search box
+and the sticker appears in the "💡 Keyword" section at the top; click it to copy. Keywords are stored in `keywords.json` in the sticker folder, so they travel with the folder.
+The **default text** of LINE message stickers is also used as keywords automatically.
+
+> ℹ The LINE app's "type text to pop up stickers" feature uses hidden tags on each sticker, but that data only exists inside the logged-in LINE app (LINE Desktop's local database is also encrypted).
+> The LINE Store and public sticker data don't provide it, so it can't be imported directly; you need to add keywords to your frequently used stickers yourself.
+
+**✏ Text stickers (stickers with customizable text)**
+
+LINE **message stickers** (each lets you type your own text) and **custom name stickers** are collected at the end of the Stickers page, in a section whose title has a ✏.
+Type text in the search box and these stickers **apply the text you typed directly**; click one to copy the sticker with your text on it. You can also right-click → "✏ Enter text and copy…" (enter `\n` for a line break).
+
+| Type | How the text is drawn |
+|---|---|
+| Message stickers | The text is drawn by the **LINE server** (same font and layout as in the LINE app; requires a network connection); without a connection it is drawn locally instead |
+| Custom name stickers | LINE's name-drawing service requires a login, so the name is drawn **locally**: the app finds the position and color of the "****" on the sticker and draws the name in Microsoft JhengHei; a name that is too long is shrunk automatically |
+
+Text stickers need the base images and `line_meta.json` that the LINE sticker downloader saves separately. **For a folder fetched by an older version of the downloader**, just download the same URL (for example the creator's page) again with the new downloader to fill them in (stickers that already exist are skipped, so it's quick).
+
+**📨 Sending via Webhook (optional)**
+
+If you don't want to switch to Discord, you can also post straight to a chosen channel with a Discord **webhook**: right-click a sticker → "📤 Send to Discord via Webhook",
+or type text in the text box at the top of the Stickers page and press `Enter` / "Send text" to **send a plain text message**.
+A webhook needs no bot account, no Discord login and doesn't violate the Terms of Service; the price is that the message is posted under the *webhook's name* (you can set a "Sender name" in the settings window) rather than your own account.
+The text you send never triggers `@everyone`, `@here` or mentions anyone.
+
+1. In the Discord channel you want to send to (you need the "Manage Webhooks" permission; your own server or a private channel works): ⚙ Edit Channel → Integrations → Webhooks → New Webhook → Copy Webhook URL
+2. In Soundboard click "🖼 Stickers" on the left → "⚙ Webhook settings…", enter a name, paste the URL and click "Save"
+3. Click "Send test message"; when "✅ Soundboard sticker connection test succeeded" shows up in the channel, you're done
+
+You can save several webhooks (for example for different servers) and switch the target with the "📨 Send via Webhook to" drop-down on the Stickers page.
+
+> 🔒 **A webhook URL works like a password for posting in that channel**: it is stored only in `%APPDATA%\Soundboard\settings.json` on your own computer, never in the source code or the repository, and the screen and log file only show a masked URL.
+> Don't share the settings file or the URL; if it ever leaks, delete that webhook under Integrations in the Discord channel settings to invalidate it.
 
 **Discord's limits and how they are handled**
 
 | Item | Handling |
 |---|---|
 | File size | A normal server allows about 10 MB per file. Static images and GIFs within the limit are sent **unchanged**; an animated sticker that is too large is shrunk and then has frames dropped until it fits (it only fails, with an explanation, if it still doesn't fit) |
-| Animated stickers | Only **GIF** is guaranteed to animate in Discord; APNG and animated WebP uploaded as attachments usually show only the first frame, so they are always **converted to GIF** automatically (transparency, frame timing and looping are kept) |
+| Animated stickers | Only **GIF** is guaranteed to animate in Discord; APNG and animated WebP uploads usually show only the first frame, so they are always **converted to GIF** automatically (transparency, frame timing and looping are kept) |
 | Transparency | GIF transparency is on/off only, so semi-transparent soft shadows at the sticker's edge are cut off; static PNGs keep full semi-transparency |
+| Text length | A text message can be at most 2000 characters; anything beyond that is not sent |
 | Sending too fast | Discord rate-limits temporarily; the app waits and retries once automatically, and only shows a message if that also fails |
 
 > Sticker artwork (LINE stickers, for example) belongs to its creators. Please use it for personal purposes only; don't redistribute or use it commercially.
@@ -617,11 +642,13 @@ The interface in each language (English / 日本語 / 한국어):
 
 ## 6. Troubleshooting
 
-**A sticker can't be sent**
+**A sticker can't be sent / text stickers**
 - "The webhook is invalid or was deleted": the webhook was removed in the Discord channel; create a new one and update the URL under "⚙ Webhook settings…"
 - "Can't connect to Discord": check your network, proxy or firewall and make sure the computer can reach discord.com
-- "The file is too large": the server's upload limit is lower than the default; choose a smaller "Send size"
-- An animated sticker doesn't move in Discord: make sure a GIF was sent (the app converts automatically); stickers pasted with "Copy to clipboard" are the converted GIF as well
+- "The file is too large": the server's upload limit is lower than the default; choose a smaller "Sticker size"
+- An animated sticker doesn't move in Discord: make sure a GIF was sent (the app converts automatically); an animated sticker copied with a click is the converted GIF as well
+- "****" wasn't replaced with my text, or a text sticker isn't in the ✏ section: that series was fetched by an older version of the downloader; download the same URL again with the new LINE sticker downloader
+- A message sticker's font differs from LINE: without a network connection (or when LINE temporarily refuses), the text is drawn locally; type it again once the connection is back
 - The thumbnail keeps showing "…" or "⚠": the file isn't a valid image, or Pillow isn't installed (`pip install pillow`)
 
 **The people in your call cannot hear the sounds**
@@ -824,6 +851,8 @@ Soundboard/
 │  ├─ replay.py              # Instant replay: ring buffers for multiple sources (apps, my microphone), time-aligned multitrack capture
 │  ├─ clips.py               # Replay clips: multitrack storage, auto volume, mixing, noise suppression, trimming, fades, export
 │  ├─ stickers.py            # Stickers: folder scanning, preparing files for Discord (animated → GIF, shrinking to the size limit), thumbnails
+│  ├─ sticker_meta.py        # Extra sticker info: reads line_meta.json (text stickers, default text) and custom keywords (keywords.json)
+│  ├─ sticker_text.py        # Text stickers: has the LINE server draw message-sticker text, or draws custom name sticker text locally
 │  ├─ discord_webhook.py     # Uploading files via a Discord webhook (standard library, rate-limit retry, masked URL)
 │  ├─ clipboard.py           # Putting files on the Windows clipboard (CF_HDROP)
 │  ├─ mictest.py             # Microphone test window: live waveform, before/after recording comparison
@@ -833,8 +862,8 @@ Soundboard/
 │  └─ gui/                   # Tkinter interface
 │     ├─ app.py              # Main window frame (sidebar, content area, status bar), playback, floating window, tray menu, background messages
 │     ├─ home.py             # 🏠 Home: sound buttons, group sections, search, dragging (sound and group order), multi-select
-│     ├─ stickers_page.py    # 🖼 Stickers page: thumbnail wall, search, import, right-click menu
-│     ├─ sticker_actions.py  # Sending / copying stickers (background threads)
+│     ├─ stickers_page.py    # 🖼 Stickers page: thumbnail wall, keyword search, text sticker section, import, right-click menu, sending text via Webhook
+│     ├─ sticker_actions.py  # Copying / sending stickers, applying text to text stickers, sending text via Webhook (background threads)
 │     ├─ webhook_dialog.py   # Discord webhook settings window
 │     ├─ replay_page.py      # ⏺ Instant replay page: recording source selection, keep length, capture, clip list
 │     ├─ clip_editor.py      # ✂ Clip / sound editor: multitrack waveforms, playhead, per-track volume (sounds ±80 dB) / noise suppression, trim, fades, save as new sound

@@ -1,4 +1,10 @@
-"""貼圖頁：貼圖縮圖牆（依系列分區），按一下傳送到 Discord；右鍵複製到剪貼簿、顯示檔案或刪除。"""
+"""貼圖頁：貼圖縮圖牆（依系列分區），按一下複製到剪貼簿；右鍵可用 Webhook 傳送、編輯關鍵字、顯示檔案或刪除。
+
+搜尋框的文字有三個用途：
+    1. 關鍵字建議：符合貼圖關鍵字的貼圖排在最前面（仿 LINE 的貼圖建議）
+    2. 文字貼圖：LINE 訊息貼圖與名字貼圖單獨成區，搜尋時直接把搜尋的文字套用上去，按一下就複製套好字的貼圖
+    3. 一般的名稱／系列搜尋
+"""
 
 from __future__ import annotations
 
@@ -14,10 +20,10 @@ from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import TYPE_CHECKING
 
-from soundboard import stickers
+from soundboard import sticker_text, stickers
 from soundboard.config import default_sound_dir
 from soundboard.gui.menus import _menu, _popup
 from soundboard.gui.presenters import grid_columns
@@ -27,6 +33,7 @@ from soundboard.gui.webhook_dialog import WebhookDialog
 from soundboard.gui.widgets import RoundedButton, RoundedFrame, ScrollArea, rounded_rect_points
 from soundboard.i18n import tr
 from soundboard.library import move_to_recycle_bin
+from soundboard.sticker_meta import KeywordStore, keyword_matches, parse_keywords
 from soundboard.theme import (
     ACCENT, BTN, BTN_HOVER, CARD, ERR, FG, FG_MUTED, FG_SUBTLE, INPUT, OK, SURFACE, WARN,
 )
@@ -51,6 +58,8 @@ THUMB_CACHE_SIZE = 1500     # 最多快取幾張縮圖（每張約 40 KB）
 DRAIN_BATCH = 16            # 每次最多處理幾張縮圖，避免一口氣塞滿而讓介面卡住
 IMPORT_CHUNK = 25           # 匯入時每複製幾個檔案更新一次進度
 BUFFER_SCREENS = 0.75       # 畫面上下各多準備幾個螢幕高度的貼圖，捲動時才不會看到空白
+SEARCH_DEBOUNCE_MS = 250    # 打字停下來多久才重新排版（文字貼圖要連網畫字，不能每打一個字就送出）
+TEXT_RENDER_WORKERS = 3
 
 
 def send_size_label(edge: int) -> str:
@@ -87,11 +96,12 @@ class StickerTile(tk.Canvas):
     """一張貼圖的縮圖按鈕：圓角底、縮圖、名稱；動態貼圖右上角有 ▶ 標記，滑鼠移上去會播放。"""
 
     def __init__(self, parent: tk.Misc, item: stickers.StickerItem, *, width: int, height: int, box: int,
-                 radius: int, caption_h: int, font_measure) -> None:
+                 radius: int, caption_h: int, font_measure, text: str = "") -> None:
         """
         Args:
             parent (tk.Misc): 父元件。
             item (stickers.StickerItem): 貼圖。
+            text (str): 文字貼圖目前套用的文字（空字串表示原圖）。
             width (int): 寬（像素）。
             height (int): 高（像素）。
             box (int): 縮圖區的長邊。
@@ -102,6 +112,7 @@ class StickerTile(tk.Canvas):
         super().__init__(parent, bg=SURFACE, highlightthickness=0, bd=0, width=width, height=height,
                          cursor="hand2", takefocus=0)
         self.item = item
+        self.text = text
         self.window_id = 0      # 這張貼圖在 canvas 上的視窗項目編號（由頁面設定）
         self._center = (width / 2, (height - caption_h) / 2)
         self.info: stickers.StickerInfo | None = None
@@ -114,7 +125,8 @@ class StickerTile(tk.Canvas):
         cx, cy = self._center
         self._image = self.create_text(cx, cy, text="…", fill=FG_SUBTLE, font=FONT_BODY)
         self._badge = self.create_text(width - 8, 8, text="▶", fill=FG_MUTED, font=FONT_SMALL, anchor="ne", state="hidden")
-        caption = ellipsize(item.name, font_measure, width - 12)
+        label = f"✏ {item.name}" if item.text_spec is not None else item.name
+        caption = ellipsize(label, font_measure, width - 12)
         self.create_text(cx, height - caption_h / 2 - 2, text=caption, fill=FG_MUTED, font=FONT_SMALL)
         self._fill = BTN
         self.bind("<Enter>", lambda _e: self._set_hover(True))
@@ -204,8 +216,13 @@ class StickersPage(tk.Frame):
         self._measure = None
         self._tile_h = self._box + m.px(CAPTION_HEIGHT) + m.px(20)
         self._loaded = False
+        self.keywords = KeywordStore(self.folder)
+        self._query = ""            # 目前套用的搜尋文字（打字停下來後才更新）
+        self._search_job: str | None = None
         # 縮圖由背景執行緒做（讀檔與縮放），PhotoImage 一律在主執行緒建立
         self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="thumb")
+        # 文字貼圖要連網請 LINE 畫字（最多等好幾秒），另外用一組執行緒，不拖慢一般縮圖
+        self._text_executor = ThreadPoolExecutor(max_workers=TEXT_RENDER_WORKERS, thread_name_prefix="sticker-text")
         self._ready: queue.Queue[tuple] = queue.Queue()
         self._pillow_ok = self._check_pillow()
         self._build_header()
@@ -248,7 +265,9 @@ class StickersPage(tk.Frame):
         m = self.app.metrics
         card = RoundedFrame(self, surface=SURFACE, bg=CARD, radius=m.px(10), padding=m.px(12))
         card.pack(fill="x", padx=self._pad, pady=(0, m.px(10)))
-        inner = card.inner
+        # 第一列：使用說明、貼圖大小、Webhook 設定；第二列：用 Webhook 傳送文字
+        inner = tk.Frame(card.inner, bg=CARD)
+        inner.pack(fill="x")
         self.discord_label = tk.Label(inner, bg=CARD, fg=FG_MUTED, font=FONT_BODY, anchor="w", justify="left")
         self.discord_label.pack(side="left", fill="x", expand=True)
         self._button(inner, tr("⚙ Webhook 設定…"), self.open_webhook_dialog, surface=CARD).pack(side="right")
@@ -258,11 +277,43 @@ class StickersPage(tk.Frame):
         self.size_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_size_changed())
         self.size_combo.bind("<MouseWheel>", lambda e: (self.scroll.scroll(int(-e.delta / 120)), "break")[1])
         self.size_combo.pack(side="right", padx=(0, m.px(8)))
-        tk.Label(inner, text=tr("傳送大小"), bg=CARD, fg=FG_MUTED, font=FONT_SMALL).pack(side="right", padx=(0, m.px(6)))
-        self.target_combo = ttk.Combobox(inner, state="readonly", width=16, font=FONT_BODY)
+        tk.Label(inner, text=tr("貼圖大小"), bg=CARD, fg=FG_MUTED, font=FONT_SMALL).pack(side="right", padx=(0, m.px(6)))
+
+        row = tk.Frame(card.inner, bg=CARD)
+        row.pack(fill="x", pady=(m.px(8), 0))
+        tk.Label(row, text=tr("📨 Webhook 傳送到"), bg=CARD, fg=FG_MUTED, font=FONT_BODY).pack(side="left")
+        self.target_combo = ttk.Combobox(row, state="readonly", width=16, font=FONT_BODY)
         self.target_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_target_changed())
         self.target_combo.bind("<MouseWheel>", lambda e: (self.scroll.scroll(int(-e.delta / 120)), "break")[1])
-        self.target_combo.pack(side="right", padx=(m.px(8), m.px(14)))
+        self.target_combo.pack(side="left", padx=(m.px(8), m.px(10)))
+        self._button(row, tr("傳送文字"), self.send_message, surface=CARD, bg=ACCENT, hover=ACCENT).pack(side="right")
+        box = RoundedFrame(row, surface=CARD, bg=INPUT, radius=m.px(8), padding=m.px(6))
+        box.pack(side="left", fill="x", expand=True, padx=(0, m.px(8)))
+        self.message_var = tk.StringVar()
+        self.message_entry = tk.Entry(box.inner, textvariable=self.message_var, bg=INPUT, fg=FG, insertbackground=FG,
+                                      relief="flat", bd=0, highlightthickness=0, font=FONT_BODY)
+        self.message_entry.pack(fill="x", expand=True, padx=m.px(4))
+        self.message_entry.bind("<Return>", lambda _e: self.send_message())
+        self._message_hint = tk.Label(box.inner, text=tr("輸入要傳到 Discord 頻道的文字，按 Enter 送出…"), bg=INPUT,
+                                      fg=FG_SUBTLE, font=FONT_BODY, cursor="xterm")
+        self._message_hint.place(in_=self.message_entry, x=0, rely=0.5, anchor="w")
+        self._message_hint.bind("<Button-1>", lambda _e: self.message_entry.focus_set())
+        self.message_var.trace_add("write", lambda *_a: self._update_message_hint())
+
+    def _update_message_hint(self) -> None:
+        if self.message_var.get():
+            self._message_hint.place_forget()
+        else:
+            self._message_hint.place(in_=self.message_entry, x=0, rely=0.5, anchor="w")
+
+    def send_message(self) -> None:
+        """用目前選擇的 Webhook 把文字框的內容傳到 Discord；尚未設定 Webhook 時開啟設定視窗。"""
+        text = self.message_var.get().strip()
+        if not text:
+            self.message_entry.focus_set()
+            return
+        if not self.actions.send_text(text, lambda ok: self._ready.put(("text_sent", ok, "", text, None))):
+            self.open_webhook_dialog()
 
     def _build_toolbar(self) -> None:
         m = self.app.metrics
@@ -278,7 +329,8 @@ class StickersPage(tk.Frame):
         self.search_entry = tk.Entry(search.inner, textvariable=self.search_var, bg=INPUT, fg=FG, insertbackground=FG,
                                      relief="flat", bd=0, highlightthickness=0, font=FONT_BODY)
         self.search_entry.pack(side="left", fill="x", expand=True, padx=(m.px(8), m.px(4)))
-        self._placeholder = tk.Label(search.inner, text=tr("搜尋貼圖或系列名稱…"), bg=INPUT, fg=FG_SUBTLE,
+        self._placeholder = tk.Label(search.inner, text=tr("輸入文字：搜尋關鍵字，並套用到文字貼圖…"), bg=INPUT,
+                                     fg=FG_SUBTLE,
                                      font=FONT_BODY, cursor="xterm")
         self._placeholder.place(in_=self.search_entry, x=0, rely=0.5, anchor="w")
         self._placeholder.bind("<Button-1>", lambda _e: self.search_entry.focus_set())
@@ -300,11 +352,11 @@ class StickersPage(tk.Frame):
         if active is None:
             self.target_combo.set("")
             self.target_combo.configure(state="disabled")
-            self.discord_label.configure(text=tr("⚠ 尚未設定 Discord Webhook，請先按右側「⚙ Webhook 設定…」"), fg=WARN)
         else:
             self.target_combo.configure(state="readonly")
             self.target_combo.set(active[0])
-            self.discord_label.configure(text=tr("按一下貼圖，傳送到 Discord 頻道："), fg=FG_MUTED)
+        self.discord_label.configure(
+            text=tr("按一下貼圖即可複製，到 Discord 按 Ctrl+V 傳送；右鍵可改用 Webhook 傳送"), fg=FG_MUTED)
         self.size_var.set(send_size_label(settings.sticker_send_size))
 
     def _on_target_changed(self) -> None:
@@ -419,7 +471,8 @@ class StickersPage(tk.Frame):
         self.app.set_status(tr("⏳ 正在讀取貼圖資料夾…"), FG_MUTED)
 
         def scan() -> None:
-            self._ready.put(("scanned", generation, "", stickers.scan_stickers(folder), None))
+            items = stickers.scan_stickers(folder)
+            self._ready.put(("scanned", generation, "", items, KeywordStore.load(folder)))
 
         self._executor.submit(scan)
 
@@ -431,7 +484,11 @@ class StickersPage(tk.Frame):
         if self.items and not self._pillow_ok:
             self.app.set_status(tr("貼圖功能需要 Pillow 套件，請執行：pip install pillow"), ERR)
         else:
-            self.app.set_status(tr("已載入 {count} 張貼圖", count=len(self.items)), OK if self.items else WARN)
+            texts = sum(1 for it in self.items if it.text_spec is not None)
+            message = tr("已載入 {count} 張貼圖", count=len(self.items))
+            if texts:
+                message += tr("（其中 {count} 張可輸入文字）", count=texts)
+            self.app.set_status(message, OK if self.items else WARN)
 
     def _make_tile(self, item: stickers.StickerItem) -> StickerTile:
         from tkinter import font as tkfont
@@ -439,21 +496,36 @@ class StickersPage(tk.Frame):
         m = self.app.metrics
         if self._measure is None:
             self._measure = tkfont.Font(font=FONT_SMALL).measure
+        text = self.display_text(item)
         tile = StickerTile(self.scroll.canvas, item, width=self._tile_w - 2 * self._gap, height=self._tile_h,
-                           box=self._box, radius=m.px(10), caption_h=m.px(CAPTION_HEIGHT), font_measure=self._measure)
+                           box=self._box, radius=m.px(10), caption_h=m.px(CAPTION_HEIGHT), font_measure=self._measure,
+                           text=text)
         tile.bind("<ButtonRelease-1>", lambda e, t=tile: self._on_release(e, t), add="+")
         tile.bind("<Button-3>", lambda e, it=item: self._show_menu(e, it))
         tile.bind("<Enter>", lambda _e, t=tile: self._on_enter(t), add="+")
         tile.bind("<Leave>", lambda _e, t=tile: self._on_leave(t), add="+")
         self.tiles[item.key] = tile      # 先登記再送出縮圖工作：工作開始時會確認這張還在畫面上
-        cached = self._thumbs.get(item.key)
+        cache_key = self._thumb_key(item, text)
+        cached = self._thumbs.get(cache_key)
         if cached is not None:
-            self._thumbs.move_to_end(item.key)
+            self._thumbs.move_to_end(cache_key)
             tile.set_image(cached[0], cached[1], failed=cached[2])
-        elif self._pillow_ok and item.key not in self._pending:
-            self._pending.add(item.key)
-            self._executor.submit(self._thumb_job, item, self._generation)
+        elif self._pillow_ok and cache_key not in self._pending:
+            self._pending.add(cache_key)
+            if text:
+                self._text_executor.submit(self._text_thumb_job, item, text, self._generation)
+            else:
+                self._executor.submit(self._thumb_job, item, self._generation)
         return tile
+
+    @staticmethod
+    def _thumb_key(item: stickers.StickerItem, text: str) -> str:
+        """縮圖快取的 key：文字貼圖每種文字各有一張縮圖。"""
+        return f"{item.key}\0{text}" if text else item.key
+
+    def display_text(self, item: stickers.StickerItem) -> str:
+        """文字貼圖目前要套用的文字（搜尋框的文字）；一般貼圖或沒有搜尋時為空字串。"""
+        return sticker_text.clean_text(self._query) if item.text_spec is not None else ""
 
     def _thumb_job(self, item: stickers.StickerItem, generation: int) -> None:
         if generation != self._generation or item.key not in self.tiles:
@@ -468,6 +540,23 @@ class StickersPage(tk.Frame):
             self._ready.put(("thumb", generation, item.key, None, None))
             return
         self._ready.put(("thumb", generation, item.key, image, info))
+
+    def _text_thumb_job(self, item: stickers.StickerItem, text: str, generation: int) -> None:
+        """套用文字的縮圖（訊息貼圖會連網請 LINE 畫字）。"""
+        key = self._thumb_key(item, text)
+        tile = self.tiles.get(item.key)
+        if generation != self._generation or tile is None or tile.text != text:
+            self._pending.discard(key)      # 已經改了搜尋文字或捲出畫面：不用畫了
+            return
+        try:
+            image, _by_line = sticker_text.render(item.text_spec, text)
+        except sticker_text.TextStickerError as exc:
+            logger.warning("%s", exc)
+            self._ready.put(("thumb", generation, key, None, None))
+            return
+        info = stickers.StickerInfo(image.width, image.height, 1, 0)
+        image.thumbnail((self._box, self._box))
+        self._ready.put(("thumb", generation, key, image, info))
 
     def _anim_job(self, item: stickers.StickerItem, token: int) -> None:
         try:
@@ -490,7 +579,12 @@ class StickersPage(tk.Frame):
                 delay = 15      # 還有東西要處理就快一點回來，但每次只做一小批
                 if kind == "scanned":
                     if tag == self._generation:
+                        self.keywords = info
                         self._finish_scan(payload)
+                elif kind == "text_sent":
+                    # 成功才清空（失敗時保留文字，修正後可以直接再送一次）；送出期間又改了文字就不動
+                    if tag and self.message_var.get().strip() == payload:
+                        self.message_var.set("")
                 elif kind == "imported":
                     self._finish_import(tag, info if info is not None else payload)
                 elif kind == "thumb" and tag == self._generation and ImageTk is not None:
@@ -499,8 +593,8 @@ class StickersPage(tk.Frame):
                     self._thumbs[key] = (photo, info, payload is None)
                     while len(self._thumbs) > THUMB_CACHE_SIZE:
                         self._thumbs.popitem(last=False)
-                    tile = self.tiles.get(key)
-                    if tile is not None:
+                    tile = self.tiles.get(key.split("\0", 1)[0])
+                    if tile is not None and self._thumb_key(tile.item, tile.text) == key:
                         tile.set_image(photo, info, failed=payload is None)
                 elif kind == "anim" and ImageTk is not None:
                     tile = self.tiles.get(key)
@@ -527,6 +621,7 @@ class StickersPage(tk.Frame):
         self._generation += 1
         self.after_cancel(self._drain_job)
         self._executor.shutdown(wait=False, cancel_futures=True)
+        self._text_executor.shutdown(wait=False, cancel_futures=True)
         self.actions.shutdown()
 
     # ================================================================== 互動
@@ -543,22 +638,73 @@ class StickersPage(tk.Frame):
     def _on_release(self, event: tk.Event, tile: StickerTile) -> None:
         # 和按鈕一致：在貼圖外放開代表反悔
         if 0 <= event.x < tile.winfo_width() and 0 <= event.y < tile.winfo_height():
-            self.send(tile.item)
+            self.copy(tile.item)
 
-    def send(self, item: stickers.StickerItem) -> None:
-        """傳送貼圖到 Discord；尚未設定 Webhook 時直接開啟設定視窗。"""
+    def _flash(self, item: stickers.StickerItem) -> None:
         tile = self.tiles.get(item.key)
         if tile is not None:
             tile.flash()
-        if not self.actions.send(item):
+
+    def copy(self, item: stickers.StickerItem, text: str | None = None) -> None:
+        """把貼圖複製到剪貼簿（文字貼圖套用搜尋框的文字），到 Discord 按 Ctrl+V 即可傳送。
+
+        Args:
+            item (stickers.StickerItem): 貼圖。
+            text (str | None): 文字貼圖要套用的文字；None 表示用搜尋框的文字。
+        """
+        self._flash(item)
+        self.actions.copy(item, self.display_text(item) if text is None else text)
+
+    def send(self, item: stickers.StickerItem) -> None:
+        """用 Webhook 傳送貼圖到 Discord；尚未設定 Webhook 時直接開啟設定視窗。"""
+        self._flash(item)
+        if not self.actions.send(item, self.display_text(item)):
             self.open_webhook_dialog()
+
+    def copy_with_text(self, item: stickers.StickerItem) -> None:
+        """詢問要套用的文字，再複製文字貼圖。"""
+        text = simpledialog.askstring(
+            tr("輸入貼圖文字"), tr("要套用在「{name}」上的文字（輸入 \\n 可換行）：", name=item.name),
+            initialvalue=self.display_text(item) or item.default_text, parent=self.app.root)
+        if text is not None and text.strip():
+            self.copy(item, text.replace("\\n", "\n"))
+
+    def edit_keywords(self, item: stickers.StickerItem) -> None:
+        """編輯貼圖的關鍵字（在搜尋框輸入關鍵字時，這張貼圖會排在最前面）。"""
+        current = ", ".join(self.keywords.get(item.key))
+        builtin = "\n" + tr("內建關鍵字（訊息貼圖的預設文字）：{text}", text=item.default_text) if item.default_text else ""
+        text = simpledialog.askstring(
+            tr("編輯關鍵字"),
+            tr("「{name}」的關鍵字，以逗號或空白分隔（例如：早安, 你好）：", name=item.name) + builtin,
+            initialvalue=current, parent=self.app.root)
+        if text is None:
+            return
+        words = parse_keywords(text)
+        try:
+            self.keywords.set(item.key, words)
+        except OSError as exc:
+            self.app.set_status(tr("無法儲存關鍵字：{error}", error=exc), ERR)
+            return
+        self.app.set_status(tr("已設定「{name}」的關鍵字：{words}", name=item.name, words=", ".join(words) or tr("（無）")),
+                            OK)
+        if self._query:
+            self.layout(force=True)
+
+    def keywords_of(self, item: stickers.StickerItem) -> tuple[str, ...]:
+        """貼圖的所有關鍵字：使用者自訂的，加上訊息貼圖的預設文字。"""
+        words = self.keywords.get(item.key)
+        if item.default_text:
+            words.append(item.default_text)
+        return tuple(words)
 
     def _show_menu(self, event: tk.Event, item: stickers.StickerItem) -> None:
         menu = _menu(self.app.root)
-        menu.add_command(label=tr("📤 傳送到 Discord"), command=lambda: self.send(item))
-        menu.add_command(label=tr("📋 複製到剪貼簿（到 Discord 按 Ctrl+V，以自己的身分傳送）"),
-                         command=lambda: self.actions.copy(item))
+        menu.add_command(label=tr("📋 複製到剪貼簿（到 Discord 按 Ctrl+V 傳送）"), command=lambda: self.copy(item))
+        if item.text_spec is not None:
+            menu.add_command(label=tr("✏ 輸入文字後複製…"), command=lambda: self.copy_with_text(item))
+        menu.add_command(label=tr("📤 用 Webhook 傳送到 Discord"), command=lambda: self.send(item))
         menu.add_separator()
+        menu.add_command(label=tr("🏷 編輯關鍵字…"), command=lambda: self.edit_keywords(item))
         menu.add_command(label=tr("📂 在檔案總管中顯示"), command=lambda: self.reveal(item))
         menu.add_command(label=tr("🗑 刪除貼圖…（檔案將移至資源回收筒）"), command=lambda: self.delete(item))
         _popup(menu, event)
@@ -590,13 +736,50 @@ class StickersPage(tk.Frame):
             self._placeholder.place_forget()
         else:
             self._placeholder.place(in_=self.search_entry, x=0, rely=0.5, anchor="w")
-        self.layout(force=True)
+        if self._search_job is not None:
+            self.after_cancel(self._search_job)
+        self._search_job = self.after(SEARCH_DEBOUNCE_MS, self._apply_search)
 
-    def _visible_items(self) -> list[stickers.StickerItem]:
-        query = self.search_var.get().strip().casefold()
+    def _apply_search(self) -> None:
+        self._search_job = None
+        query = self.search_var.get().strip()
+        if query != self._query:
+            self._query = query
+            self.layout(force=True)
+
+    def build_sections(self) -> list[tuple[str, list[stickers.StickerItem]]]:
+        """依搜尋文字把貼圖分區（標題, 貼圖）。
+
+        沒有搜尋時：一般貼圖依系列分區，文字貼圖的系列排在最後並加上「✏」。
+        有搜尋時：關鍵字符合的貼圖 →（套用搜尋文字的）文字貼圖 → 名稱或系列符合的一般貼圖。
+
+        Returns:
+            list[tuple[str, list[stickers.StickerItem]]]: 各區的標題與貼圖。
+        """
+        query = self._query
+        normal = [it for it in self.items if it.text_spec is None]
+        texts = [it for it in self.items if it.text_spec is not None]
+
+        def by_series(items: list[stickers.StickerItem], prefix: str = "") -> list[tuple[str, list]]:
+            groups: dict[str, list[stickers.StickerItem]] = {}
+            for item in items:
+                groups.setdefault(item.series, []).append(item)
+            return [(prefix + (stickers.series_title(series) or tr("（根目錄）")), members)
+                    for series, members in groups.items()]
+
         if not query:
-            return self.items
-        return [it for it in self.items if query in it.name.casefold() or query in it.series.casefold()]
+            return by_series(normal) + by_series(texts, "✏ ")
+        q = query.casefold()
+        matched = [it for it in self.items if keyword_matches(query, self.keywords_of(it))]
+        matched_keys = {it.key for it in matched}
+        sections: list[tuple[str, list]] = []
+        if matched:
+            sections.append((tr("💡 關鍵字「{query}」", query=query), matched))
+        sections += by_series([it for it in texts if it.key not in matched_keys], "✏ ")
+        named = [it for it in normal if it.key not in matched_keys
+                 and (q in it.name.casefold() or q in it.series.casefold())]
+        sections += by_series(named)
+        return sections
 
     def layout(self, force: bool = False) -> None:
         """依視窗寬度與搜尋條件計算每一列的位置（依系列分區），再補上畫面附近的貼圖。
@@ -613,18 +796,18 @@ class StickersPage(tk.Frame):
         self._columns = columns
         m = self.app.metrics
         row_h = self._tile_h + 2 * self._gap
-        visible = self._visible_items()
-        by_series: dict[str, list[stickers.StickerItem]] = {}
-        for item in visible:
-            by_series.setdefault(item.series, []).append(item)
-        show_headers = len(by_series) > 1 or (bool(by_series) and "" not in by_series)
+        sections = self.build_sections()
+        shown = sum(len(members) for _title, members in sections)
+        # 只有根目錄一區、而且沒有搜尋時不需要標題
+        show_headers = len(sections) > 1 or bool(self._query) or any(
+            members[0].series or members[0].text_spec is not None for _title, members in sections)
         rows: list[tuple[str, object]] = []
         tops: list[int] = []
         y = 0
-        for series, members in by_series.items():
+        for title, members in sections:
             if show_headers:
                 tops.append(y)
-                rows.append(("header", f"{stickers.series_title(series) or tr('（根目錄）')}　{len(members)}"))
+                rows.append(("header", f"{title}　{len(members)}"))
                 y += m.px(HEADER_HEIGHT)
             for i in range(0, len(members), columns):
                 tops.append(y)
@@ -639,11 +822,11 @@ class StickersPage(tk.Frame):
         if self._hint is not None:
             canvas.delete(self._hint)
             self._hint = None
-        if not visible:
+        if not shown:
             self._hint = self._empty_hint()
             y = m.px(200)
         self.scroll.set_virtual_height(max(1, y))
-        self.count_label.configure(text=tr("{shown} / {total} 張貼圖", shown=len(visible), total=len(self.items)))
+        self.count_label.configure(text=tr("{shown} / {total} 張貼圖", shown=shown, total=len(self.items)))
         self.scroll.canvas.yview_moveto(0)
         self._update_visible()
 
@@ -674,7 +857,8 @@ class StickersPage(tk.Frame):
             else:
                 for col, item in enumerate(content):
                     wanted[item.key] = (item, col * self._tile_w + self._gap, y + self._gap)
-        for key in [k for k in self.tiles if k not in wanted]:
+        # 不在畫面附近的、或文字貼圖要套用的文字變了：回收重做
+        for key in [k for k, t in self.tiles.items() if k not in wanted or t.text != self.display_text(t.item)]:
             self._drop_tile(key)
         for index in [i for i in self._headers if i not in headers]:
             canvas.delete(self._headers.pop(index))
@@ -692,8 +876,8 @@ class StickersPage(tk.Frame):
         tile.destroy()
 
     def _empty_hint(self) -> int:
-        if self.search_var.get().strip():
-            text = tr("找不到符合「{query}」的貼圖", query=self.search_var.get().strip())
+        if self._query:
+            text = tr("找不到符合「{query}」的貼圖", query=self._query)
         else:
             text = tr("此資料夾中沒有貼圖\n"
                       "按一下「➕ 匯入貼圖」加入圖片，或按「📁 選擇資料夾」選擇已有貼圖的資料夾"

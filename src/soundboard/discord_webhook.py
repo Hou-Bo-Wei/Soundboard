@@ -24,6 +24,7 @@ _WEBHOOK_RE = re.compile(
     r"^https://(?:(?:canary|ptb)\.)?(?:discord|discordapp)\.com/api(?:/v\d+)?/webhooks/(?P<id>\d+)/(?P<token>[\w-]+)/?$")
 USER_AGENT = "SoundboardStickers (https://github.com/Hou-Bo-Wei/Soundboard, 0.1)"
 REQUEST_TIMEOUT = 30.0
+MAX_CONTENT_LENGTH = 2000   # Discord 一則訊息的字數上限
 MAX_RETRY_WAIT = 10.0       # 被限速時最多願意等幾秒再重試一次
 
 
@@ -193,7 +194,9 @@ def send_file(webhook_url: str, filename: str, data: bytes, content_type: str, *
 
 
 def send_text(webhook_url: str, text: str, *, username: str = "") -> SendResult:
-    """用 Webhook 傳一則文字（測試連線用）。
+    """用 Webhook 傳一則純文字訊息（貼圖頁的「傳送文字」與測試連線）。
+
+    不會觸發 @everyone、@here 或提及任何人（allowed_mentions 設為空），避免打字時不小心通知整個伺服器。
 
     Args:
         webhook_url (str): Webhook 網址。
@@ -209,7 +212,7 @@ def send_text(webhook_url: str, text: str, *, username: str = "") -> SendResult:
     url = normalize_webhook_url(webhook_url)
     if url is None:
         raise DiscordError(tr("Webhook 網址格式不正確（應為 https://discord.com/api/webhooks/…）"))
-    payload: dict[str, object] = {"content": text[:2000], "allowed_mentions": {"parse": []}}
+    payload: dict[str, object] = {"content": text[:MAX_CONTENT_LENGTH], "allowed_mentions": {"parse": []}}
     if username.strip():
         payload["username"] = username.strip()[:80]
     reply = _post_with_retry(f"{url}?wait=true", json.dumps(payload, ensure_ascii=False).encode("utf-8"),

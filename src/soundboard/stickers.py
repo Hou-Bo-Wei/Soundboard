@@ -20,10 +20,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from soundboard.i18n import tr
+from soundboard.sticker_meta import AUX_DIR_NAME, StickerMeta, TextSpec, load_series_meta
 
 logger = logging.getLogger(__name__)
 
 STICKER_EXTENSIONS: frozenset[str] = frozenset({".png", ".apng", ".gif", ".webp", ".jpg", ".jpeg"})
+# LINE 貼圖下載器存的「全螢幕特效層」不是貼圖本身，不列出來
+_SKIP_SUFFIXES: tuple[str, ...] = ("_popup",)
 
 # 傳給 Discord 的檔案大小上限（bytes）。預設伺服器的上限是 10 MiB，扣掉一點給表單格式的額外開銷
 DISCORD_UPLOAD_LIMIT: int = 10 * 1024 * 1024 - 64 * 1024
@@ -49,12 +52,24 @@ class StickerItem:
         path (Path): 檔案完整路徑。
         name (str): 顯示名稱（不含副檔名）。
         series (str): 所屬系列（貼圖在哪個子資料夾；直接放在根目錄時為空字串）。
+        meta (StickerMeta | None): LINE 貼圖下載器記錄的資訊（預設文字、可自訂文字）；沒有時為 None。
     """
 
     key: str
     path: Path
     name: str
     series: str
+    meta: StickerMeta | None = None
+
+    @property
+    def text_spec(self) -> TextSpec | None:
+        """可自訂文字時的資訊（LINE 訊息貼圖或名字貼圖）；一般貼圖為 None。"""
+        return self.meta.text if self.meta is not None else None
+
+    @property
+    def default_text(self) -> str:
+        """預設文字（訊息貼圖才有）。"""
+        return self.meta.default_text if self.meta is not None else ""
 
 
 @dataclass(frozen=True)
@@ -126,15 +141,19 @@ def scan_stickers(folder: Path) -> list[StickerItem]:
         return []
     items: list[StickerItem] = []
     # os.walk 讀目錄時順便拿到檔案類型，比 rglob 再對每個檔案 stat 一次快很多（幾千張時差好幾倍）
-    for current, _dirs, names in os.walk(folder):
+    for current, dirs, names in os.walk(folder):
+        # 「.line」等以點開頭的資料夾放的是輔助檔（文字貼圖的底圖），不是貼圖
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d != AUX_DIR_NAME]
         series = Path(current).relative_to(folder).as_posix()
         series = "" if series == "." else series
+        metas = load_series_meta(Path(current)) if "line_meta.json" in names else {}
         for filename in names:
-            if os.path.splitext(filename)[1].lower() not in STICKER_EXTENSIONS:
+            stem, ext = os.path.splitext(filename)
+            if ext.lower() not in STICKER_EXTENSIONS or stem.endswith(_SKIP_SUFFIXES):
                 continue
             key = f"{series}/{filename}" if series else filename
-            items.append(StickerItem(key=key, path=Path(current) / filename, name=os.path.splitext(filename)[0],
-                                     series=series))
+            items.append(StickerItem(key=key, path=Path(current) / filename, name=stem, series=series,
+                                     meta=metas.get(stem)))
     items.sort(key=lambda it: (natural_key(it.series), natural_key(it.name)))
     return items
 

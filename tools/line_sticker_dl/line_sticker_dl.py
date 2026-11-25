@@ -26,6 +26,13 @@ LINE 貼圖下載器（個人自用）
   webp : 轉成動態 WebP（完整半透明，畫質最好）
   靜態貼圖一律只存 PNG。已存在的檔案會略過，所以中斷後重跑可以接續。
 
+文字貼圖與 line_meta.json
+--------------------------
+  訊息貼圖（每張可自己打字）與「隨你填」名字貼圖也能下載：主圖存成 001.png（訊息貼圖疊上預設文字，
+  名字貼圖的名字位置是「****」），沒有字的底圖等輔助檔放在隱藏的 .line 資料夾。
+  每個系列資料夾另外寫一份 line_meta.json（貼圖 ID、預設文字、文字貼圖的底圖與文字 API），
+  音效版的「🖼 貼圖」頁用它來套用自己輸入的文字與搜尋關鍵字。舊版下載的資料夾重新下載一次即可補上。
+
 依賴：Python 3.8+、tkinter（內建）；轉 GIF / WebP、縮圖縮放需要 Pillow（pip install pillow）。
 請僅供個人本機使用，不要散布或商用——貼圖版權屬於原創作者與 LINE。
 """
@@ -58,6 +65,14 @@ KINDS = {  # kind -> (中文名, 商品頁網址)
 AUTHOR_URL = "https://store.line.me/{shop}/author/{id}/zh-Hant?page={page}"
 AUTHOR_SHOPS = {"author": "stickershop", "emoji_author": "emojishop"}  # 目標種類 -> 商店路徑
 WORKERS = 4  # 同時下載幾張
+CDN = "https://stickershop.line-scdn.net/stickershop/v1"
+# 可以自訂文字的貼圖：訊息貼圖（每張自己打字）與「隨你填」名字貼圖
+TEXT_KINDS = {"PER_STICKER_TEXT": "message", "NAME_TEXT": "name"}
+# 訊息貼圖的文字由 LINE 伺服器畫成透明圖層（在網址後面接上文字）；必須帶商品頁當 Referer
+OVERLAY_API = "https://store.line.me/overlay/sticker/{pid}/{sid}/iPhone/sticker.png?text="
+META_FILE = "line_meta.json"   # 每個系列資料夾一份，音效版讀它來支援文字貼圖與關鍵字
+AUX_DIR = ".line"              # 文字貼圖的底圖等輔助檔（音效版不會把它們當成貼圖）
+META_FORMAT = 1
 
 
 # ---------------------------------------------------------------- 網路 / 解析
@@ -110,13 +125,58 @@ def safe_name(s):
     return re.sub(r"\s+", " ", s)[:60] or "LINE貼圖"
 
 
+def fetch_product_meta(pack_id):
+    """讀取貼圖組的 productInfo.meta（貼圖 ID、種類、訊息貼圖的預設文字）；讀不到時回傳空 dict。"""
+    try:
+        return json.loads(http_get(f"{CDN}/product/{pack_id}/android/productInfo.meta", retries=2))
+    except Exception:
+        return {}
+
+
+def text_items_from_meta(pack_id, meta):
+    """可自訂文字的貼圖組：依 productInfo.meta 組出下載項目（商品頁上沒有逐張的圖檔網址可用）。
+
+    訊息貼圖：底圖（沒有字）＋預設文字圖層，另外記下 LINE 畫文字的 API。
+    名字貼圖：顯示用的圖（名字位置是「****」）＋沒有名字的底圖，音效版比對兩張圖找出名字的位置。
+    """
+    text_kind = TEXT_KINDS.get(meta.get("stickerResourceType", ""))
+    if not text_kind:
+        return []
+    items = []
+    for s in meta.get("stickers", []):
+        sid = str(s.get("id", ""))
+        if not sid:
+            continue
+        if text_kind == "message":
+            items.append({
+                "type": "per_sticker_text", "id": sid, "textKind": "message",
+                "staticUrl": f"{CDN}/sticker/{sid}/iPhone/base/plus/sticker@2x.png",
+                "customOverlayUrl": f"{CDN}/product/{pack_id}/sticker/{sid}/iPhone/overlay/plus/default/sticker@2x.png",
+                "customApi": OVERLAY_API.format(pid=pack_id, sid=sid),
+                "defaultText": ((s.get("customPlus") or {}).get("defaultText") or ""),
+            })
+        else:
+            items.append({
+                "type": "name", "id": sid, "textKind": "name",
+                "staticUrl": f"{CDN}/sticker/{sid}/iPhone/sticker@2x.png",
+                "baseUrl": f"{CDN}/sticker/{sid}/iPhone/base/sticker@2x.png",
+            })
+    return items
+
+
 def fetch_pack(kind, pack_id):
-    """回傳 (標題, [項目])。每個項目是 data-preview 的 dict。"""
+    """回傳 (標題, [項目])。每個項目是 data-preview 的 dict（文字貼圖另外帶 textKind 等欄位）。"""
     raw = http_get(KINDS[kind][1].format(id=pack_id))
     text = raw.decode("utf-8", "replace")
     m = re.search(r'<meta property="og:title" content="([^"]*)"', text)
     title = html.unescape(m.group(1)) if m else f"line_{pack_id}"
     title = re.split(r"\s+[–\-|]\s+LINE", title)[0]
+
+    if kind == "sticker":
+        # 文字貼圖的商品頁只給沒有字的底圖（訊息貼圖）或根本沒有逐張圖片（名字貼圖），改用 meta
+        items = text_items_from_meta(pack_id, fetch_product_meta(pack_id))
+        if items:
+            return safe_name(title), items
 
     items, seen = [], set()
     for _, blob in re.findall(r"data-preview=(['\"])(.*?)\1", text, flags=re.S):
@@ -133,7 +193,7 @@ def fetch_pack(kind, pack_id):
             continue
         items.append(d)
     if not items:
-        raise RuntimeError("這組沒有可下載的貼圖（可能是自訂名字貼圖、區域限定，或頁面改版了）")
+        raise RuntimeError("這組沒有可下載的貼圖（可能是區域限定，或頁面改版了）")
     return safe_name(title), items
 
 
@@ -219,6 +279,54 @@ def _save_via(path, func, data):
     os.replace(tmp, path)
 
 
+def compose_message(base, overlay, dst):
+    """訊息貼圖：把預設文字圖層疊到底圖上，存成一般看得到文字的貼圖。"""
+    b = Image.open(io.BytesIO(base)).convert("RGBA")
+    o = Image.open(io.BytesIO(overlay)).convert("RGBA")
+    if o.size != b.size:
+        o = o.resize(b.size)
+    b.alpha_composite(o)
+    b.save(dst, format="PNG")
+
+
+def _make_aux_dir(folder):
+    aux = os.path.join(folder, AUX_DIR)
+    if not os.path.isdir(aux):
+        os.makedirs(aux, exist_ok=True)
+        if sys.platform == "win32":  # 設成隱藏，在檔案總管裡不礙眼
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetFileAttributesW(aux, 0x02)
+            except Exception:
+                pass
+    return aux
+
+
+def build_meta(kind, pack_id, title, items, store_url):
+    """組出寫進 line_meta.json 的內容（音效版用：文字貼圖的底圖與 API、預設文字）。"""
+    resource = ""
+    stickers = []
+    for idx, d in enumerate(items, 1):
+        base = f"{idx:03d}"
+        entry = {"stem": base, "id": str(d.get("id", "")), "default_text": d.get("defaultText", "")}
+        text_kind = d.get("textKind")
+        if text_kind == "message":
+            resource = "PER_STICKER_TEXT"
+            entry["text"] = {"kind": "message", "base": f"{AUX_DIR}/{base}_base.png",
+                             "overlay": f"{AUX_DIR}/{base}_overlay.png", "api": d.get("customApi", "")}
+        elif text_kind == "name":
+            resource = "NAME_TEXT"
+            entry["text"] = {"kind": "name", "base": f"{AUX_DIR}/{base}_base.png"}
+        stickers.append(entry)
+    return {"format": META_FORMAT, "kind": kind, "package_id": str(pack_id), "title": title,
+            "resource_type": resource, "store_url": store_url, "stickers": stickers}
+
+
+def write_meta(folder, meta):
+    _save_bytes(os.path.join(folder, META_FILE),
+                json.dumps(meta, ensure_ascii=False, indent=1).encode("utf-8"))
+
+
 # ---------------------------------------------------------------- 下載
 def download_pack(target, out_root, formats, log=print, progress=None, stop=None,
                   prefetched=None, verbose=True):
@@ -248,12 +356,43 @@ def download_pack(target, out_root, formats, log=print, progress=None, stop=None
         log("⚠ 沒安裝 Pillow，無法轉 GIF / WebP（pip install pillow），只存原始檔")
     need_apng = "apng" in formats or not (want_gif or want_webp)
     ref = KINDS[kind][1].format(id=pack_id)
+    n_text = sum(1 for d in items if d.get("textKind"))
+    if n_text:
+        _make_aux_dir(folder)
+        vlog(f"  可自訂文字的貼圖 {n_text} 張（音效版可直接套用文字）")
+
+    def work_text(base, d):
+        """文字貼圖：主圖（看得到預設文字或「****」）＋ .line 裡的底圖等輔助檔。"""
+        main = os.path.join(folder, base + ".png")
+        aux_base = os.path.join(folder, AUX_DIR, base + "_base.png")
+        if d["textKind"] == "message":
+            aux_overlay = os.path.join(folder, AUX_DIR, base + "_overlay.png")
+            paths = [main, aux_base, aux_overlay]
+            if all(os.path.exists(p) and os.path.getsize(p) > 0 for p in paths):
+                return f"{base} 已存在，略過"
+            base_data = http_get(d["staticUrl"], referer=ref)
+            overlay_data = http_get(d["customOverlayUrl"], referer=ref)
+            _save_bytes(aux_base, base_data)
+            _save_bytes(aux_overlay, overlay_data)
+            if HAVE_PIL:
+                _save_via(main, lambda data, dst: compose_message(data, overlay_data, dst), base_data)
+            else:
+                _save_bytes(main, base_data)
+            return f"{base} 訊息貼圖 ✓"
+        paths = [main, aux_base]
+        if all(os.path.exists(p) and os.path.getsize(p) > 0 for p in paths):
+            return f"{base} 已存在，略過"
+        _save_bytes(main, http_get(d["staticUrl"], referer=ref))
+        _save_bytes(aux_base, http_get(d["baseUrl"], referer=ref))
+        return f"{base} 名字貼圖 ✓"
 
     def work(idx, d):
         if stop and stop.is_set():
             return idx, None, ""
         base = f"{idx:03d}"
         try:
+            if d.get("textKind"):
+                return idx, True, work_text(base, d)
             anim = d.get("animationUrl") or ""
             popup = d.get("popupUrl") or ""
             static = d.get("staticUrl") or ""
@@ -314,6 +453,8 @@ def download_pack(target, out_root, formats, log=print, progress=None, stop=None
                 log(f"  [{title}] {msg}")
             if progress:
                 progress(done, total)
+    # 每次都重寫：舊版下載的資料夾重新下載一次（檔案都會略過）就能補上這份資訊
+    write_meta(folder, build_meta(kind, pack_id, title, items, ref))
     if stop and stop.is_set():
         log("已中止")
     log(("完成：" if verbose else "  → ") + f"成功 {ok}、失敗 {fail}")
@@ -566,10 +707,13 @@ def run_gui(hook=None):
             state["cell_w"] = 108
             items = p["items"]
             n_anim = sum(1 for d in items if d.get("animationUrl"))
-            pv_info.configure(text=f"「{p['title']}」：{len(items)} 張（動態 {n_anim}）")
+            n_text = sum(1 for d in items if d.get("textKind"))
+            extra = f"，可自訂文字 {n_text}" if n_text else ""
+            pv_info.configure(text=f"「{p['title']}」：{len(items)} 張（動態 {n_anim}{extra}）")
             for i, d in enumerate(items):
+                badge = "▶" if d.get("animationUrl") else ("✏" if d.get("textKind") else "")
                 add_cell(i, d.get("staticUrl") or d.get("fallbackStaticUrl") or "",
-                         f"{i + 1:03d}", None, "▶" if d.get("animationUrl") else "")
+                         f"{i + 1:03d}", None, badge)
         reflow(force=True)
 
     def set_all(v):
