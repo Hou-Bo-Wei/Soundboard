@@ -3,7 +3,12 @@
 LINE App 的「貼圖建議」用的是每張貼圖的隱藏標籤，但這份資料只在登入的 LINE App 裡，
 LINE Store 與 CDN 都沒有公開。所以這裡的關鍵字來源是：
     * 訊息貼圖的預設文字（LINE 公開的 productInfo.meta 裡有）
+    * 系列資料夾裡的 ``sticker_keywords.json``：每張貼圖「圖上的字」（``t``）與關鍵字（``k``），
+      由 ``tools/sticker_keywords`` 看總覽圖產生，格式與貼圖鍵盤 App 的 ``tools/keywords/<組id>.json`` 相同
     * 使用者在貼圖上按右鍵「🏷 編輯關鍵字…」自己加的字詞（存在貼圖資料夾的 ``keywords.json``）
+
+搜尋時依「比對的緊密程度」打分數排序（完全相同 > 結尾相同 > 開頭相同 > 包含），
+符合圖上的字再加分，讓真的寫著這句話的貼圖排在前面。
 
 這個模組不依賴 Tk，方便單獨測試。
 """
@@ -14,6 +19,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 META_FILENAME = "line_meta.json"
 KEYWORDS_FILENAME = "keywords.json"
+TAGS_FILENAME = "sticker_keywords.json"
 AUX_DIR_NAME = ".line"
 # 關鍵字之間的分隔：中英文逗號、頓號、分號、換行與空白
 _KEYWORD_SPLIT = re.compile(r"[,，、;；\s]+")
@@ -128,11 +135,155 @@ def parse_keywords(text: str) -> list[str]:
     return words
 
 
+@dataclass(frozen=True)
+class StickerTags:
+    """一張貼圖在 ``sticker_keywords.json`` 裡的文字。
+
+    Attributes:
+        text (str): 圖上寫的字（沒有字時為空字串）。
+        keywords (tuple[str, ...]): 關鍵字：同義詞、白話翻譯、英文、情緒或場合。
+    """
+
+    text: str = ""
+    keywords: tuple[str, ...] = ()
+
+
+def load_series_tags(folder: Path) -> dict[str, StickerTags]:
+    """讀取系列資料夾裡的 ``sticker_keywords.json``。
+
+    格式：``{"001": {"t": "圖上的字", "k": ["關鍵字", ...]}, ...}``；值直接是清單時視為只有關鍵字。
+
+    Args:
+        folder (Path): 系列資料夾。
+
+    Returns:
+        dict[str, StickerTags]: 檔名主檔名（例如 ``001``）→ 文字；沒有檔案或格式不對時為空 dict。
+    """
+    path = folder / TAGS_FILENAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        logger.warning("無法讀取 %s：%s", path, exc)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, StickerTags] = {}
+    for stem, entry in data.items():
+        if isinstance(entry, list):
+            entry = {"k": entry}
+        if not isinstance(entry, dict):
+            continue
+        words = entry.get("k") or []
+        keywords = tuple(str(w).strip() for w in words if str(w).strip()) if isinstance(words, list) else ()
+        result[str(stem)] = StickerTags(text=str(entry.get("t") or "").strip(), keywords=keywords)
+    return result
+
+
+def normalize_term(text: str) -> str:
+    """比對前的整理：去掉標點、符號與空白，英文轉小寫（``OK``、``ok``、``Ok!`` 都一樣）。
+
+    Args:
+        text (str): 搜尋文字或關鍵字。
+
+    Returns:
+        str: 整理後的文字。
+    """
+    # 貼圖上的字常帶「~」「！」「★」，使用者打字時通常不會打，比對時一律忽略
+    return "".join(ch for ch in text.casefold() if unicodedata.category(ch)[0] not in "PSZC")
+
+
+@dataclass(frozen=True)
+class SearchTerms:
+    """一張貼圖整理好、可以直接比對的文字（每次打字都要比對幾千張，先整理好比較快）。
+
+    Attributes:
+        text (str): 圖上的字（已整理）。
+        keywords (tuple[str, ...]): 關鍵字（已整理）。
+    """
+
+    text: str = ""
+    keywords: tuple[str, ...] = ()
+
+    @classmethod
+    def build(cls, text: str, keywords: tuple[str, ...] | list[str]) -> SearchTerms:
+        """從原始文字建立。
+
+        Args:
+            text (str): 圖上的字。
+            keywords (tuple[str, ...] | list[str]): 關鍵字。
+
+        Returns:
+            SearchTerms: 整理好的文字（空字串與重複會去掉）。
+        """
+        normalized = dict.fromkeys(w for w in (normalize_term(k) for k in keywords) if w)
+        return cls(normalize_term(text), tuple(normalized))
+
+
+# 圖上的字比中時的加分：讓「圖上真的寫這句話」的貼圖排在只有同義詞的前面
+_TEXT_BONUS = 10
+
+
+def term_score(query: str, term: str) -> int:
+    """一個關鍵字的分數（兩者都要先用 :func:`normalize_term` 整理過）。
+
+    ============================================  ===================  ==========================
+    情況                                          分數                 例子
+    ============================================  ===================  ==========================
+    完全相同                                      100                  打「晚安」，關鍵字「晚安」
+    打的字以關鍵字結尾（關鍵字至少 2 字）         60 + 關鍵字字數×2    打「好啦再見」，關鍵字「再見」
+    關鍵字以打的字開頭（打的字至少 2 字）         50                   打「再見」，關鍵字「再見啦」
+    關鍵字包含打的字（打的字至少 2 字）           40                   打「放假」，關鍵字「等待放假」
+    打的字包含關鍵字（關鍵字至少 2 字）           30 + 關鍵字字數×2    打「今天好累喔」，關鍵字「好累」
+    ============================================  ===================  ==========================
+
+    Args:
+        query (str): 整理過的搜尋文字。
+        term (str): 整理過的關鍵字。
+
+    Returns:
+        int: 分數；不符合時為 0。
+    """
+    if not query or not term:
+        return 0
+    if query == term:
+        return 100
+    # 只打一個字時必須完全相同，否則幾千張貼圖裡會跳出一大堆不相關的
+    long_term = len(term) >= _MIN_CONTAINED_KEYWORD
+    long_query = len(query) >= _MIN_CONTAINED_KEYWORD
+    if long_term and query.endswith(term):
+        return 60 + 2 * len(term)
+    if long_query and term.startswith(query):
+        return 50
+    if long_query and query in term:
+        return 40
+    if long_term and term in query:
+        return 30 + 2 * len(term)
+    return 0
+
+
+def match_score(query: str, terms: SearchTerms) -> int:
+    """一張貼圖對搜尋文字的分數：取圖上的字與每個關鍵字的最高分，比中圖上的字再加分。
+
+    Args:
+        query (str): 整理過的搜尋文字（:func:`normalize_term`）。
+        terms (SearchTerms): 貼圖的文字。
+
+    Returns:
+        int: 分數；0 表示不符合。
+    """
+    best = max((term_score(query, k) for k in terms.keywords), default=0)
+    on_image = term_score(query, terms.text)
+    if on_image:
+        best = max(best, on_image + _TEXT_BONUS)
+    return best
+
+
 def keyword_matches(query: str, keywords: tuple[str, ...] | list[str]) -> bool:
     """搜尋文字是否觸發關鍵字（仿 LINE 的貼圖建議：打「早安」會出現標了「早安」的貼圖）。
 
-    符合的條件（不分大小寫）：關鍵字包含搜尋文字（打「早」也會出現「早安」），
-    或搜尋文字包含兩個字以上的關鍵字（打「大家早安」也會出現「早安」）。
+    規則見 :func:`term_score`；比對前會去掉標點與空白、英文不分大小寫。
 
     Args:
         query (str): 搜尋框的文字。
@@ -141,14 +292,7 @@ def keyword_matches(query: str, keywords: tuple[str, ...] | list[str]) -> bool:
     Returns:
         bool: 是否符合。
     """
-    q = query.strip().casefold()
-    if not q:
-        return False
-    for word in keywords:
-        w = word.casefold()
-        if q in w or (len(w) >= _MIN_CONTAINED_KEYWORD and w in q):
-            return True
-    return False
+    return match_score(normalize_term(query), SearchTerms.build("", keywords)) > 0
 
 
 @dataclass

@@ -229,15 +229,21 @@ class StickerActions:
     def import_files(files: list[tuple[Path, Path]]) -> int:
         """把貼圖檔複製進貼圖資料夾（不覆蓋同名檔案）。
 
+        系列的資料檔（``line_meta.json``、``sticker_keywords.json``）則直接覆蓋：它們描述整組貼圖，
+        重新匯入同一組時應該換成新的，而不是多一份讀不到的「(2)」。
+
         Args:
             files (list[tuple[Path, Path]]): （來源檔, 目的資料夾）。
 
         Returns:
-            int: 成功複製的數量。
+            int: 成功複製的貼圖數量（不含資料檔）。
         """
         count = 0
         for source, folder in files:
             folder.mkdir(parents=True, exist_ok=True)
+            if source.name in stickers.SERIES_DATA_FILES:
+                shutil.copy2(source, folder / source.name)
+                continue
             shutil.copy2(source, stickers.unique_destination(folder, source.name))
             count += 1
         return count

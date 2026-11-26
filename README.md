@@ -399,10 +399,11 @@ PNG and GIF are put on the clipboard as "files", so a pasted GIF still animates;
 
 **Adding stickers**
 
-- Click "➕ Import stickers" → "Import image files…" (multi-select) or "Import a whole folder…" (sub-folders are kept and treated as "series")
+- Click "➕ Import stickers" → "Import image files…" (multi-select) or "Import a whole folder…" (sub-folders are kept and treated as "series"; a series' `line_meta.json` and `sticker_keywords.json` are copied too)
 - Or click "📁 Choose folder" and point it at a folder that already contains stickers, such as the output folder of a LINE sticker downloader (one folder per series; the page groups stickers by series)
 - The default sticker folder is "貼圖" next to the sound folder (you can also drop files in and click "🔄 Refresh")
 - Supported: `.png` (including APNG), `.gif`, `.webp` (including animated), `.jpg`
+- When one sticker comes in several formats (for example, the LINE sticker downloader saves an animated sticker as both an APNG `001.png` and a `001.gif`), only one is shown, and the GIF is preferred
 - With a very large collection (thousands of stickers), prefer "📁 Choose folder" pointed at the original folder over "Import": importing copies every file (a minute or two for thousands; you can keep using the app meanwhile), while choosing a folder is instant and uses no extra disk space. The thumbnail wall only loads the stickers near the viewport, so thousands of stickers stay smooth
 
 **Using it**
@@ -417,12 +418,74 @@ PNG and GIF are put on the clipboard as "files", so a pasted GIF still animates;
 
 **🏷 Keywords (type a word and the matching stickers pop up)**
 
-Right-click a sticker → "🏷 Edit keywords…" and enter a few words (separated by commas or spaces, e.g. `hello, hi`). After that, type "hello" (or "hello everyone") in the search box
-and the sticker appears in the "💡 Keyword" section at the top; click it to copy. Keywords are stored in `keywords.json` in the sticker folder, so they travel with the folder.
-The **default text** of LINE message stickers is also used as keywords automatically.
+Type "hello" (or "hello everyone") in the search box, and the stickers that have that keyword appear in the "💡 Keyword" section at the top; click one to copy it.
+Each sticker's keywords come from three sources:
+
+| Source | Description |
+|---|---|
+| `sticker_keywords.json` in the series folder | The text on each sticker plus 3-7 keywords (plain-language translations, synonyms, English, emotions). Generate it for a whole folder at once by looking at overview sheets with [`tools/sticker_keywords`](tools/sticker_keywords); see below |
+| Right-click → "🏷 Edit keywords…" | Words you add yourself (separated by commas or spaces, e.g. `hello, hi`), stored in `keywords.json` in the sticker folder |
+| Default text of LINE message stickers | Used automatically as the text on the sticker |
+
+The "💡 Keyword" section is sorted by how closely each sticker matches: stickers that match the text on the sticker come before those that only match a synonym. Matching ignores punctuation, whitespace, and English letter case,
+so typing "OK" or "ok!" gives the same result:
+
+| Case | Example | Order |
+|---|---|---|
+| Exactly the same | You type "晚安", keyword is "晚安" | First |
+| What you typed ends with the keyword | You type "好啦再見", keyword is "再見" | ↓ |
+| Keyword starts with what you typed | You type "再見", keyword is "再見啦" | ↓ |
+| Keyword contains what you typed | You type "放假", keyword is "等待放假" | ↓ |
+| What you typed contains the keyword | You type "今天好累喔", keyword is "好累" | Last |
+
+If you type only one character, it must match exactly, so thousands of stickers don't throw up a pile of unrelated ones.
 
 > ℹ The LINE app's "type text to pop up stickers" feature uses hidden tags on each sticker, but that data only exists inside the logged-in LINE app (LINE Desktop's local database is also encrypted).
-> The LINE Store and public sticker data don't provide it, so it can't be imported directly; you need to add keywords to your frequently used stickers yourself.
+> The LINE Store and public sticker data don't provide it, so we generate keywords ourselves by looking at the pictures.
+
+**Generating keywords automatically (LINE sticker downloader + Claude API, optional)**
+
+If you have a [Claude API key](https://console.anthropic.com), this is the easiest way: in the LINE sticker downloader, click "Settings…" in the 「AI 關鍵字」 ("AI keywords") row and paste the key,
+then tick 「下載完自動產生關鍵字」 ("Generate keywords after download"). From then on, every set you download gets its keywords written by Claude from the pictures and saved in the same folder; click "🔄 Refresh" in Soundboard and you can search them.
+For folders you downloaded earlier, click 「為資料夾補關鍵字…」 ("Add keywords to a folder…") to fill them all in at once (it shows the estimated cost first). The default model is Sonnet 5.5, about US$0.03-0.05 per set of 40 stickers;
+stickers that already have keywords are not redone, and ones you edited by hand are kept. See [`tools/line_sticker_dl`](tools/line_sticker_dl/README.md) for details.
+
+**Generating keywords for a whole sticker folder by hand (`tools/sticker_keywords`)**
+
+If you don't have an API key, you can also do it yourself with the steps below (or have an AI tool such as Claude Code do it for you):
+
+1. Make overview sheets: each sticker set is tiled into one image, with a number in the top-left corner of each cell.
+
+   ```powershell
+   python tools/sticker_keywords/sticker_keywords.py sheets "$env:USERPROFILE\Downloads\LINE貼圖" out\sheets
+   ```
+
+2. Look at the sheets and write a keyword file `<set id>.json` (the set id is the number after the last underscore in the series folder name). You can write it yourself, or hand the sheets to an AI (such as Claude) to write from the pictures:
+
+   ```json
+   {
+    "001": {"t": "你阿嬤腳好!", "k": ["腳好", "很好", "讚", "厲害"]},
+    "002": {"t": "哩賀~", "k": ["你好", "哈囉", "嗨", "hi", "打招呼", "哩賀"]},
+    "003": {"t": "", "k": ["生氣", "哼"]}
+   }
+   ```
+
+   `t` is the text on the sticker (leave it empty if there is none); `k` is what users might type: plain-language translations of Taiwanese or "Martian" slang ("歹勢" → "不好意思"), synonyms, English, emotions or occasions.
+
+3. Install into the sticker folder: each `<set id>.json` is saved as `sticker_keywords.json` in the matching series folder (existing ones are merged). Go back to Soundboard and click "🔄 Refresh" for it to take effect.
+
+   ```powershell
+   python tools/sticker_keywords/sticker_keywords.py install "$env:USERPROFILE\Downloads\LINE貼圖" out\keywords
+   ```
+
+4. Check which series still lack keywords:
+
+   ```powershell
+   python tools/sticker_keywords/sticker_keywords.py status "$env:USERPROFILE\Downloads\LINE貼圖"
+   ```
+
+When you add a new sticker set later, use `sheets --only-missing` to tile only the series that don't have keywords yet. If typing a word doesn't bring up the sticker you wanted,
+right-click that sticker → "🏷 Edit keywords…" and add it right there, filling things in as you go. The keyword file format is the same as `tools/keywords/<set id>.json` of the LINE sticker keyboard app, so the two can share files.
 
 **✏ Text stickers (stickers with customizable text)**
 
@@ -851,7 +914,7 @@ Soundboard/
 │  ├─ replay.py              # Instant replay: ring buffers for multiple sources (apps, my microphone), time-aligned multitrack capture
 │  ├─ clips.py               # Replay clips: multitrack storage, auto volume, mixing, noise suppression, trimming, fades, export
 │  ├─ stickers.py            # Stickers: folder scanning, preparing files for Discord (animated → GIF, shrinking to the size limit), thumbnails
-│  ├─ sticker_meta.py        # Extra sticker info: reads line_meta.json (text stickers, default text) and custom keywords (keywords.json)
+│  ├─ sticker_meta.py        # Extra sticker info: line_meta.json (text stickers), sticker_keywords.json, custom keywords, keyword scoring
 │  ├─ sticker_text.py        # Text stickers: has the LINE server draw message-sticker text, or draws custom name sticker text locally
 │  ├─ discord_webhook.py     # Uploading files via a Discord webhook (standard library, rate-limit retry, masked URL)
 │  ├─ clipboard.py           # Putting files on the Windows clipboard (CF_HDROP)

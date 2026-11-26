@@ -94,12 +94,68 @@ def test_parse_keywords_splits_and_dedupes() -> None:
 
 
 @pytest.mark.parametrize(("query", "expected"), [
-    ("早安", True), ("早", True), ("大家早安", True), ("GOOD", True), ("晚安", False), ("", False),
-    ("安安你好", False),        # 單字的關鍵字「安」不因為被包含就符合
+    ("早安", True), ("大家早安", True), ("GOOD", True), ("早安！", True), ("晚安", False), ("", False),
+    ("早", False),              # 只打一個字時必須完全相同，否則幾千張貼圖會跳出一大堆
+    ("安", True),               # 一個字的關鍵字「安」完全相同
+    ("安安你好", False),        # 一個字的關鍵字「安」不因為被包含就符合
 ])
 def test_keyword_matches(query: str, expected: bool) -> None:
-    assert sticker_meta.keyword_matches(query, ["早安", "good morning", "安"]) is expected or (
-        query == "安安你好" and sticker_meta.keyword_matches(query, ["安"]) is False)
+    assert sticker_meta.keyword_matches(query, ["早安", "good morning", "安"]) is expected
+
+
+def test_normalize_term_drops_punctuation_and_case() -> None:
+    assert sticker_meta.normalize_term(" OK! ") == "ok"
+    assert sticker_meta.normalize_term("哩賀~") == "哩賀"
+    assert sticker_meta.normalize_term("★亮金金★") == "亮金金"
+    assert sticker_meta.normalize_term("good night") == "goodnight"
+
+
+@pytest.mark.parametrize(("query", "term", "score"), [
+    ("晚安", "晚安", 100),
+    ("好啦再見", "再見", 64),       # 打的字以關鍵字結尾：60 + 2×2
+    ("再見", "再見啦", 50),         # 關鍵字以打的字開頭
+    ("放假", "等待放假", 40),       # 關鍵字包含打的字
+    ("今天好累喔", "好累", 34),     # 打的字包含關鍵字：30 + 2×2
+    ("早", "早安", 0),              # 一個字只接受完全相同
+    ("早早早", "早", 0),            # 一個字的關鍵字不因為被包含就符合
+    ("吃飯", "睡覺", 0),
+])
+def test_term_score_table(query: str, term: str, score: int) -> None:
+    assert sticker_meta.term_score(query, term) == score
+
+
+def test_match_score_prefers_text_on_image() -> None:
+    on_image = sticker_meta.SearchTerms.build("再見!", ["掰掰"])
+    synonym = sticker_meta.SearchTerms.build("", ["再見", "掰掰"])
+    q = sticker_meta.normalize_term("再見")
+    assert sticker_meta.match_score(q, on_image) == 110          # 圖上的字比中再加 10 分
+    assert sticker_meta.match_score(q, synonym) == 100
+    assert sticker_meta.match_score(sticker_meta.normalize_term("bye"), on_image) == 0
+
+
+def test_load_series_tags(tmp_path: Path) -> None:
+    (tmp_path / sticker_meta.TAGS_FILENAME).write_text(json.dumps({
+        "001": {"t": " 哩賀~ ", "k": ["你好", " ", "hi"]},
+        "002": ["生氣", "哼"],                  # 只有關鍵字的簡寫
+        "003": "壞掉的項目",
+    }, ensure_ascii=False), encoding="utf-8")
+    tags = sticker_meta.load_series_tags(tmp_path)
+    assert tags["001"] == sticker_meta.StickerTags("哩賀~", ("你好", "hi"))
+    assert tags["002"] == sticker_meta.StickerTags("", ("生氣", "哼"))
+    assert "003" not in tags
+    (tmp_path / sticker_meta.TAGS_FILENAME).write_text("{壞掉", encoding="utf-8")
+    assert sticker_meta.load_series_tags(tmp_path) == {}
+
+
+def test_scan_attaches_tags(tmp_path: Path) -> None:
+    (tmp_path / "組_123").mkdir()
+    for stem in ("001", "002"):
+        _base().save(tmp_path / "組_123" / f"{stem}.png")
+    (tmp_path / "組_123" / sticker_meta.TAGS_FILENAME).write_text(
+        json.dumps({"001": {"t": "早安", "k": ["morning"]}}, ensure_ascii=False), encoding="utf-8")
+    first, second = stickers.scan_stickers(tmp_path)
+    assert first.tags == sticker_meta.StickerTags("早安", ("morning",))
+    assert second.tags is None
 
 
 def test_keyword_store_roundtrip(tmp_path: Path) -> None:

@@ -33,7 +33,14 @@ LINE 貼圖下載器（個人自用）
   每個系列資料夾另外寫一份 line_meta.json（貼圖 ID、預設文字、文字貼圖的底圖與文字 API），
   音效版的「🖼 貼圖」頁用它來套用自己輸入的文字與搜尋關鍵字。舊版下載的資料夾重新下載一次即可補上。
 
-依賴：Python 3.8+、tkinter（內建）；轉 GIF / WebP、縮圖縮放需要 Pillow（pip install pillow）。
+AI 關鍵字（選用）
+------------------
+  在「AI 關鍵字」設定 Claude API 金鑰後，下載完會請 Claude 看貼圖寫出圖上的字與搜尋關鍵字，
+  存成系列資料夾的 sticker_keywords.json（音效版搜尋時直接讀取）。命令列加 --keywords。
+  實作在 tools/sticker_keywords/keyword_ai.py。
+
+依賴：Python 3.8+、tkinter（內建）；轉 GIF / WebP、縮圖縮放需要 Pillow（pip install pillow）；
+AI 關鍵字需要 Python 3.10+ 與 anthropic（pip install anthropic）。
 請僅供個人本機使用，不要散布或商用——貼圖版權屬於原創作者與 LINE。
 """
 import argparse
@@ -55,6 +62,16 @@ try:
     HAVE_PIL = True
 except Exception:  # Pillow 沒裝就只能存原始檔
     HAVE_PIL = False
+
+# AI 關鍵字（tools/sticker_keywords/keyword_ai.py）：下載完請 Claude 看圖寫關鍵字。
+# 從原始碼執行時要把隔壁的資料夾加進搜尋路徑；打包成 exe 時模組已經包在裡面
+_KW_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "sticker_keywords")
+if os.path.isdir(_KW_DIR) and _KW_DIR not in sys.path:
+    sys.path.insert(0, os.path.normpath(_KW_DIR))
+try:
+    import keyword_ai
+except Exception:  # 少了 anthropic 或 sticker_keywords 時只是不能用 AI 關鍵字
+    keyword_ai = None
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -462,9 +479,10 @@ def download_pack(target, out_root, formats, log=print, progress=None, stop=None
 
 
 def download_author(author_id, out_root, formats, log=print, progress=None, stop=None,
-                    prefetched=None, selected=None, limit=None, shop="stickershop"):
+                    prefetched=None, selected=None, limit=None, shop="stickershop", on_pack=None):
     """下載作者全部作品：out_root/<作者>_<ID>/<系列>_<ID>/（表情貼作者多一層「表情貼」標記）。
-    selected 為 {(kind,id)} 時只抓這些；limit 只抓前 N 組。回傳作者資料夾。"""
+    selected 為 {(kind,id)} 時只抓這些；limit 只抓前 N 組；on_pack(系列資料夾) 在每組下載完時呼叫
+    （用來只為這次下載的系列產生關鍵字）。回傳作者資料夾。"""
     if prefetched:
         name, packs = prefetched
     else:
@@ -490,10 +508,12 @@ def download_author(author_id, out_root, formats, log=print, progress=None, stop
         log(f"[{i + 1}/{n}] {p['title']}（{KINDS[p['kind']][0]}）")
         sub = (lambda a, b, i=i: progress(i + a / max(b, 1), n)) if progress else None
         try:
-            _, ok, fail = download_pack((p["kind"], p["id"]), folder, formats, log=log,
-                                        progress=sub, stop=stop, verbose=False)
+            pack_folder, ok, fail = download_pack((p["kind"], p["id"]), folder, formats, log=log,
+                                                  progress=sub, stop=stop, verbose=False)
             tot_ok += ok
             tot_fail += fail
+            if on_pack:
+                on_pack(pack_folder)
         except Exception as e:
             bad_packs += 1
             log(f"  ✗ 略過此系列：{e}")
@@ -565,8 +585,23 @@ def run_gui(hook=None):
     ttk.Checkbutton(fmt_box, text="動態 WebP", variable=v_webp).pack(side="left")
     if not HAVE_PIL:
         v_gif.set(False)
-        ttk.Label(frm, text="（未安裝 Pillow：只能存原始檔，請 pip install pillow）",
-                  foreground="#b45309").grid(row=3, column=1, columnspan=2, sticky="w", padx=10)
+        ttk.Label(fmt_box, text="（未安裝 Pillow：只能存原始檔，請 pip install pillow）",
+                  foreground="#b45309").pack(side="left", padx=(12, 0))
+
+    # --- AI 關鍵字 ---
+    ttk.Label(frm, text="AI 關鍵字").grid(row=3, column=0, sticky="w", **pad)
+    ai_box = ttk.Frame(frm)
+    ai_box.grid(row=3, column=1, columnspan=2, sticky="ew", **pad)
+    ai_settings = keyword_ai.AISettings.load() if keyword_ai else None
+    v_auto = tk.BooleanVar(value=bool(ai_settings and ai_settings.auto and ai_settings.effective_key))
+    chk_auto = ttk.Checkbutton(ai_box, text="下載完自動產生關鍵字", variable=v_auto)
+    chk_auto.pack(side="left")
+    ai_status = ttk.Label(ai_box, foreground="#555")
+    ai_status.pack(side="left", padx=(8, 0))
+    btn_fill = ttk.Button(ai_box, text="為資料夾補關鍵字…")
+    btn_fill.pack(side="right")
+    btn_ai = ttk.Button(ai_box, text="設定…", width=6)
+    btn_ai.pack(side="right", padx=(0, 4))
 
     btn_row = ttk.Frame(frm)
     btn_row.grid(row=4, column=0, columnspan=3, sticky="ew", **pad)
@@ -742,6 +777,8 @@ def run_gui(hook=None):
                     show_preview(val)
                 elif kind == "pvdone":
                     btn_prev.configure(state="normal")
+                elif kind == "call":        # 背景執行緒要求在主執行緒做的事（Tk 不能跨執行緒操作）
+                    val()
                 elif kind == "thumb":
                     gen, idx, data = val
                     lbl = state["labels"].get(idx)
@@ -790,19 +827,181 @@ def run_gui(hook=None):
     btn_paste.configure(command=paste)
     btn_prev.configure(command=do_preview)
 
-    def worker(t, out, fmts, selected, prefetched):
+    def worker(t, out, fmts, selected, prefetched, auto_keywords):
+        packs = []      # 這次下載的系列資料夾（只為這些產生關鍵字，不動到以前下載的）
         try:
             prog = lambda a, b: q.put(("prog", (a, b)))
             if t[0] in AUTHOR_SHOPS:
                 state["folder"] = download_author(t[1], out, fmts, log=log, progress=prog,
                                                   stop=state["stop"], prefetched=prefetched,
-                                                  selected=selected, shop=AUTHOR_SHOPS[t[0]])
+                                                  selected=selected, shop=AUTHOR_SHOPS[t[0]],
+                                                  on_pack=packs.append)
             else:
                 state["folder"] = download_pack(t, out, fmts, log=log, progress=prog,
                                                 stop=state["stop"], prefetched=prefetched)[0]
+                packs.append(state["folder"])
+            if auto_keywords and packs and not state["stop"].is_set():
+                keyword_ai.fill_keywords(packs, keyword_ai.AISettings.load(), log=log, progress=prog,
+                                         stop=state["stop"])
         except Exception as e:
             log(f"✗ {e}")
         q.put(("done", None))
+
+    # ---- AI 關鍵字：設定視窗、補關鍵字
+    def refresh_ai_status():
+        if keyword_ai is None:
+            ai_status.configure(text="（此版本沒有 AI 關鍵字功能）")
+            for w in (chk_auto, btn_ai, btn_fill):
+                w.configure(state="disabled")
+            return
+        s = keyword_ai.AISettings.load()
+        model = keyword_ai.model_choice(s.model).label.split("（")[0]     # 狀態列只放短名稱
+        ai_status.configure(text=f"{model}・{'已設定金鑰' if s.effective_key else '尚未設定金鑰'}")
+
+    def on_auto_toggle():
+        s = keyword_ai.AISettings.load()
+        if v_auto.get() and not s.effective_key:
+            v_auto.set(False)
+            open_ai_settings(enable_auto=True)
+            return
+        s.auto = v_auto.get()
+        try:
+            s.save()
+        except OSError as e:
+            log(f"✗ 無法儲存設定：{e}")
+
+    def open_ai_settings(enable_auto=False):
+        s = keyword_ai.AISettings.load()
+        dlg = tk.Toplevel(root)
+        dlg.title("AI 關鍵字設定")
+        dlg.transient(root)
+        dlg.resizable(False, False)
+        body = ttk.Frame(dlg, padding=14)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+
+        ttk.Label(body, text="Claude API 金鑰").grid(row=0, column=0, sticky="w", pady=4)
+        key_var = tk.StringVar(value=s.api_key)
+        key_ent = ttk.Entry(body, textvariable=key_var, show="•", width=46)
+        key_ent.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=4)
+        show_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(body, text="顯示", variable=show_var,
+                        command=lambda: key_ent.configure(show="" if show_var.get() else "•")
+                        ).grid(row=0, column=2, padx=(6, 0))
+
+        ttk.Label(body, text="模型").grid(row=1, column=0, sticky="w", pady=4)
+        labels = [m.label for m in keyword_ai.MODELS]
+        ids = [m.model_id for m in keyword_ai.MODELS]
+        model_var = tk.StringVar(value=labels[ids.index(s.model)] if s.model in ids else labels[0])
+        combo = ttk.Combobox(body, textvariable=model_var, values=labels, state="readonly", width=24)
+        combo.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=4)
+        note = ttk.Label(body, foreground="#555", wraplength=440, justify="left")
+        note.grid(row=2, column=1, columnspan=2, sticky="w", padx=(8, 0))
+
+        def show_note(_e=None):
+            note.configure(text=keyword_ai.MODELS[labels.index(model_var.get())].note)
+        combo.bind("<<ComboboxSelected>>", show_note)
+        show_note()
+
+        ttk.Label(body, wraplength=600, justify="left", text=(
+            "・金鑰在 console.anthropic.com 的「API Keys」頁面建立，費用依用量從你的 Anthropic 帳戶扣款。\n"
+            "・金鑰會加密存在這台電腦，只有目前的 Windows 帳號能解開。\n"
+            "・產生關鍵字時，貼圖的總覽圖會傳送到 Anthropic 處理。\n"
+            "・關鍵字存在每個系列資料夾的 sticker_keywords.json，音效版搜尋時直接讀取。")
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 6))
+        result = ttk.Label(body, wraplength=600, justify="left")
+        result.grid(row=4, column=0, columnspan=3, sticky="w")
+
+        def chosen_model():
+            return ids[labels.index(model_var.get())]
+
+        def test_key():
+            key = key_var.get().strip()
+            if not key:
+                result.configure(text="請先輸入金鑰", foreground="#b45309")
+                return
+            result.configure(text="測試中…", foreground="#555")
+            model = chosen_model()
+
+            def w():
+                try:
+                    name = keyword_ai.check_key(key, model)
+                    msg, color = f"✓ 金鑰可以使用 {name}", "#15803d"
+                except keyword_ai.KeywordAIError as e:
+                    msg, color = f"✗ {e}", "#b91c1c"
+                q.put(("call", lambda: result.winfo_exists() and result.configure(text=msg, foreground=color)))
+            threading.Thread(target=w, daemon=True).start()
+
+        def save():
+            s.api_key = key_var.get().strip()
+            s.model = chosen_model()
+            if enable_auto and s.api_key:
+                s.auto = True
+            s.auto = s.auto and bool(s.effective_key)
+            try:
+                s.save()
+            except OSError as e:
+                messagebox.showerror("無法儲存", str(e), parent=dlg)
+                return
+            v_auto.set(s.auto)
+            refresh_ai_status()
+            dlg.destroy()
+
+        btns = ttk.Frame(body)
+        btns.grid(row=5, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="測試金鑰", command=test_key).pack(side="left")
+        ttk.Button(btns, text="儲存", command=save).pack(side="left", padx=6)
+        ttk.Button(btns, text="取消", command=dlg.destroy).pack(side="left")
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+        key_ent.focus_set()
+        dlg.grab_set()
+
+    def fill_folder():
+        s = keyword_ai.AISettings.load()
+        if not s.effective_key:
+            open_ai_settings()
+            return
+        d = filedialog.askdirectory(title="選擇要補關鍵字的貼圖資料夾（可以選上層資料夾）",
+                                    initialdir=out_var.get() if os.path.isdir(out_var.get()) else None)
+        if not d:
+            return
+        btn_fill.configure(state="disabled")
+        log("檢查哪些系列還缺關鍵字…")
+
+        def w():
+            todo = keyword_ai.plan([d], s.model)
+            q.put(("call", lambda: confirm_fill(d, s, todo)))
+        threading.Thread(target=w, daemon=True).start()
+
+    def confirm_fill(d, s, todo):
+        btn_fill.configure(state="normal")
+        if not todo.series:
+            log("所有系列都已經有關鍵字")
+            return
+        label = keyword_ai.model_choice(s.model).label
+        if not messagebox.askyesno("產生關鍵字", (
+                f"將用 {label} 為 {len(todo.series)} 組、{todo.stickers} 張貼圖產生關鍵字，"
+                f"預估約 US${todo.estimate:.2f}（實際以 Anthropic 帳單為準）。\n\n要開始嗎？")):
+            return
+        state["folder"] = d
+        state["stop"] = threading.Event()
+        btn_go.configure(state="disabled")
+        btn_stop.configure(state="normal")
+        bar["value"] = 0
+
+        def w():
+            try:
+                keyword_ai.fill_keywords([d], s, log=log, progress=lambda a, b: q.put(("prog", (a, b))),
+                                         stop=state["stop"])
+            except Exception as e:
+                log(f"✗ {e}")
+            q.put(("done", None))
+        threading.Thread(target=w, daemon=True).start()
+
+    chk_auto.configure(command=on_auto_toggle)
+    btn_ai.configure(command=open_ai_settings)
+    btn_fill.configure(command=fill_folder)
+    refresh_ai_status()
 
     def start():
         text = url_var.get().strip()
@@ -832,7 +1031,8 @@ def run_gui(hook=None):
         btn_stop.configure(state="normal")
         btn_open.configure(state="disabled")
         bar["value"] = 0
-        threading.Thread(target=worker, args=(t, out_var.get(), fmts, selected, prefetched),
+        auto_keywords = bool(keyword_ai and v_auto.get())
+        threading.Thread(target=worker, args=(t, out_var.get(), fmts, selected, prefetched, auto_keywords),
                          daemon=True).start()
 
     def stop():
@@ -871,6 +1071,8 @@ def main():
     ap.add_argument("-o", "--out", default=os.path.join(os.path.expanduser("~"), "Downloads", "LINE貼圖"))
     ap.add_argument("-f", "--formats", default="apng,gif", help="apng,gif,webp（逗號分隔）")
     ap.add_argument("--limit", type=int, default=None, help="作者頁只抓前 N 個系列（測試用）")
+    ap.add_argument("--keywords", action="store_true",
+                    help="下載完用 Claude API 產生關鍵字（使用 GUI 設定的金鑰與模型，或環境變數 ANTHROPIC_API_KEY）")
     a = ap.parse_args()
     if not a.url:
         run_gui()
@@ -880,10 +1082,15 @@ def main():
         t = parse_target(a.url)
         if not t:
             raise RuntimeError("看不出網址或 ID，請貼 LINE Store 商品頁 / 作者頁網址")
+        packs = []
         if t[0] in AUTHOR_SHOPS:
-            download_author(t[1], a.out, fmts, limit=a.limit, shop=AUTHOR_SHOPS[t[0]])
+            download_author(t[1], a.out, fmts, limit=a.limit, shop=AUTHOR_SHOPS[t[0]], on_pack=packs.append)
         else:
-            download_pack(t, a.out, fmts)
+            packs.append(download_pack(t, a.out, fmts)[0])
+        if a.keywords:
+            if keyword_ai is None:
+                raise RuntimeError("此版本沒有 AI 關鍵字功能（需要 anthropic 套件）")
+            keyword_ai.fill_keywords(packs, keyword_ai.AISettings.load())
     except Exception as e:
         print(f"✗ {e}")
         sys.exit(1)

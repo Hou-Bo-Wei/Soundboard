@@ -33,7 +33,7 @@ from soundboard.gui.webhook_dialog import WebhookDialog
 from soundboard.gui.widgets import RoundedButton, RoundedFrame, ScrollArea, rounded_rect_points
 from soundboard.i18n import tr
 from soundboard.library import move_to_recycle_bin
-from soundboard.sticker_meta import KeywordStore, keyword_matches, parse_keywords
+from soundboard.sticker_meta import KeywordStore, SearchTerms, match_score, normalize_term, parse_keywords
 from soundboard.theme import (
     ACCENT, BTN, BTN_HOVER, CARD, ERR, FG, FG_MUTED, FG_SUBTLE, INPUT, OK, SURFACE, WARN,
 )
@@ -217,6 +217,7 @@ class StickersPage(tk.Frame):
         self._tile_h = self._box + m.px(CAPTION_HEIGHT) + m.px(20)
         self._loaded = False
         self.keywords = KeywordStore(self.folder)
+        self._terms: dict[str, SearchTerms] = {}    # 貼圖 key → 整理好的比對文字（掃描或改關鍵字時清掉）
         self._query = ""            # 目前套用的搜尋文字（打字停下來後才更新）
         self._search_job: str | None = None
         # 縮圖由背景執行緒做（讀檔與縮放），PhotoImage 一律在主執行緒建立
@@ -421,7 +422,8 @@ class StickersPage(tk.Frame):
 
         def collect() -> list[tuple[Path, Path]]:
             return [(p, dest / p.parent.relative_to(source)) for p in sorted(source.rglob("*"))
-                    if p.is_file() and p.suffix.lower() in stickers.STICKER_EXTENSIONS]
+                    if p.is_file() and (p.suffix.lower() in stickers.STICKER_EXTENSIONS
+                                        or p.name in stickers.SERIES_DATA_FILES)]
 
         self._start_import(collect)
 
@@ -580,6 +582,7 @@ class StickersPage(tk.Frame):
                 if kind == "scanned":
                     if tag == self._generation:
                         self.keywords = info
+                        self._terms.clear()
                         self._finish_scan(payload)
                 elif kind == "text_sent":
                     # 成功才清空（失敗時保留文字，修正後可以直接再送一次）；送出期間又改了文字就不動
@@ -672,7 +675,12 @@ class StickersPage(tk.Frame):
     def edit_keywords(self, item: stickers.StickerItem) -> None:
         """編輯貼圖的關鍵字（在搜尋框輸入關鍵字時，這張貼圖會排在最前面）。"""
         current = ", ".join(self.keywords.get(item.key))
-        builtin = "\n" + tr("內建關鍵字（訊息貼圖的預設文字）：{text}", text=item.default_text) if item.default_text else ""
+        builtin = ""
+        on_image = item.tags.text if item.tags is not None and item.tags.text else item.default_text
+        if on_image:
+            builtin += "\n" + tr("圖上的字：{text}", text=on_image)
+        if item.tags is not None and item.tags.keywords:
+            builtin += "\n" + tr("內建關鍵字：{words}", words=", ".join(item.tags.keywords))
         text = simpledialog.askstring(
             tr("編輯關鍵字"),
             tr("「{name}」的關鍵字，以逗號或空白分隔（例如：早安, 你好）：", name=item.name) + builtin,
@@ -682,6 +690,7 @@ class StickersPage(tk.Frame):
         words = parse_keywords(text)
         try:
             self.keywords.set(item.key, words)
+            self._terms.pop(item.key, None)
         except OSError as exc:
             self.app.set_status(tr("無法儲存關鍵字：{error}", error=exc), ERR)
             return
@@ -691,11 +700,22 @@ class StickersPage(tk.Frame):
             self.layout(force=True)
 
     def keywords_of(self, item: stickers.StickerItem) -> tuple[str, ...]:
-        """貼圖的所有關鍵字：使用者自訂的，加上訊息貼圖的預設文字。"""
+        """貼圖的所有關鍵字：使用者自訂的、``sticker_keywords.json`` 的，加上訊息貼圖的預設文字。"""
         words = self.keywords.get(item.key)
+        if item.tags is not None:
+            words += item.tags.keywords
         if item.default_text:
             words.append(item.default_text)
         return tuple(words)
+
+    def terms_of(self, item: stickers.StickerItem) -> SearchTerms:
+        """貼圖整理好的比對文字（第一次用到才整理，之後從快取拿）。"""
+        terms = self._terms.get(item.key)
+        if terms is None:
+            # 「圖上的字」優先用 sticker_keywords.json 的；訊息貼圖沒有時，預設文字就是圖上的字
+            on_image = item.tags.text if item.tags is not None and item.tags.text else item.default_text
+            terms = self._terms[item.key] = SearchTerms.build(on_image, self.keywords_of(item))
+        return terms
 
     def _show_menu(self, event: tk.Event, item: stickers.StickerItem) -> None:
         menu = _menu(self.app.root)
@@ -751,7 +771,7 @@ class StickersPage(tk.Frame):
         """依搜尋文字把貼圖分區（標題, 貼圖）。
 
         沒有搜尋時：一般貼圖依系列分區，文字貼圖的系列排在最後並加上「✏」。
-        有搜尋時：關鍵字符合的貼圖 →（套用搜尋文字的）文字貼圖 → 名稱或系列符合的一般貼圖。
+        有搜尋時：關鍵字符合的貼圖（分數高的在前）→（套用搜尋文字的）文字貼圖 → 名稱或系列符合的一般貼圖。
 
         Returns:
             list[tuple[str, list[stickers.StickerItem]]]: 各區的標題與貼圖。
@@ -770,7 +790,12 @@ class StickersPage(tk.Frame):
         if not query:
             return by_series(normal) + by_series(texts, "✏ ")
         q = query.casefold()
-        matched = [it for it in self.items if keyword_matches(query, self.keywords_of(it))]
+        normalized = normalize_term(query)
+        scored = [(score, index, it) for index, it in enumerate(self.items)
+                  if (score := match_score(normalized, self.terms_of(it))) > 0]
+        # 分數相同時維持原本的系列順序，同一組的貼圖會排在一起
+        scored.sort(key=lambda entry: (-entry[0], entry[1]))
+        matched = [it for _score, _index, it in scored]
         matched_keys = {it.key for it in matched}
         sections: list[tuple[str, list]] = []
         if matched:

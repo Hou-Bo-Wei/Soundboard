@@ -59,11 +59,40 @@ Message stickers and custom-name stickers can be downloaded too. Each series fol
 
 > 傳到 Discord 時，音效版會自動把 APNG／WebP 轉成會動的 GIF，所以只存 APNG 原檔也可以。
 
+### AI 關鍵字（選用，需要 Claude API 金鑰）
+
+LINE 貼圖本身沒有可以下載的關鍵字，所以下載器可以請 Claude 看貼圖，寫出每張的「圖上的字」與搜尋關鍵字，
+存成系列資料夾的 `sticker_keywords.json`。音效版在搜尋框打「早安」時，就會跳出對應的貼圖。
+
+1. 到 [console.anthropic.com](https://console.anthropic.com) 的「API Keys」頁面建立金鑰（費用依用量從你的 Anthropic 帳戶扣款）。
+2. 下載器「AI 關鍵字」列按「設定…」→ 貼上金鑰 →「測試金鑰」（不產生費用）→「儲存」。
+3. 勾選「下載完自動產生關鍵字」。之後每下載一組，就會自動產生那一組的關鍵字。
+
+以前下載、還沒有關鍵字的資料夾，按「為資料夾補關鍵字…」選擇資料夾（可以選整個 `LINE貼圖`）。
+開始前會列出要處理幾組、幾張與預估費用，確認後才會開始。
+
+| 模型 | 一組 40 張的費用（約） | 說明 |
+|---|---|---|
+| **Sonnet 5.5（預設）** | US$0.03～0.05 | 藝術字、直排字與台語、火星文的白話翻譯都讀得準 |
+| Haiku 5.5 | US$0.002 | 價格約 Sonnet 的 1/20；還沒實測過藝術字，可能較常讀錯字 |
+| Opus 5.5 | US$0.06～0.10 | 約 Sonnet 的 2 倍；Sonnet 讀錯很多時再改用 |
+
+- 已經有關鍵字的貼圖不會重做；手動改過的關鍵字會保留，只補上缺少的。
+- 金鑰以 Windows DPAPI 加密存在 `%APPDATA%\LineStickerDownloader\settings.json`，只有目前的 Windows 帳號能解開。
+  也可以不存金鑰，改設環境變數 `ANTHROPIC_API_KEY`。
+- 產生關鍵字時，貼圖的總覽圖（每組拼成一張）會傳送到 Anthropic 處理。
+- 不想用 API 也可以照 [`tools/sticker_keywords`](../sticker_keywords) 的說明手動做。
+
+AI keywords are optional and need a Claude API key from console.anthropic.com, billed by usage. Set the key via 「設定…」 ("Settings…"), tick 「下載完自動產生關鍵字」 ("Generate keywords after download"), and use 「為資料夾補關鍵字…」 ("Add keywords to a folder…") for older folders; it shows an estimated cost before starting. The default model is Sonnet 5.5 at about US$0.03-0.05 per 40-sticker set, and Haiku 5.5 or Opus 5.5 can be selected instead. The key is stored encrypted with Windows DPAPI (or read from the `ANTHROPIC_API_KEY` environment variable). Note that the sticker overview image is sent to Anthropic.
+
 ### 命令列
 
 ```powershell
-python line_sticker_dl.py <網址或ID> [-o 輸出資料夾] [-f apng,gif,webp] [--limit N]
+python line_sticker_dl.py <網址或ID> [-o 輸出資料夾] [-f apng,gif,webp] [--limit N] [--keywords]
 ```
+
+加上 `--keywords` 會在下載完用 Claude 產生關鍵字（使用介面裡設定的金鑰與模型，或環境變數 `ANTHROPIC_API_KEY`）。
+從原始碼執行 AI 關鍵字需要 Python 3.10 以上與 `pip install anthropic`（exe 版已內含）。
 
 輸出位置預設為 `下載\LINE貼圖\`：
 

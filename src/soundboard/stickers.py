@@ -20,13 +20,29 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from soundboard.i18n import tr
-from soundboard.sticker_meta import AUX_DIR_NAME, StickerMeta, TextSpec, load_series_meta
+from soundboard.sticker_meta import (
+    AUX_DIR_NAME,
+    META_FILENAME,
+    TAGS_FILENAME,
+    StickerMeta,
+    StickerTags,
+    TextSpec,
+    load_series_meta,
+    load_series_tags,
+)
 
 logger = logging.getLogger(__name__)
 
 STICKER_EXTENSIONS: frozenset[str] = frozenset({".png", ".apng", ".gif", ".webp", ".jpg", ".jpeg"})
 # LINE 貼圖下載器存的「全螢幕特效層」不是貼圖本身，不列出來
 _SKIP_SUFFIXES: tuple[str, ...] = ("_popup",)
+# 系列資料夾裡描述整組貼圖的資料檔（文字貼圖資訊、關鍵字）：匯入資料夾時要一起複製，而且直接覆蓋，
+# 否則會變成「line_meta (2).json」而讀不到
+SERIES_DATA_FILES: frozenset[str] = frozenset({META_FILENAME, TAGS_FILENAME})
+# 同一張貼圖有好幾種格式時（LINE 貼圖下載器的動態貼圖預設同時存 APNG 的 NNN.png 與 NNN.gif）只列一張，
+# 依這個順序挑：GIF 可以直接貼到 Discord 而且會動，APNG／WebP 傳送前還要轉檔
+_FORMAT_PREFERENCE: dict[str, int] = {ext: rank for rank, ext in enumerate(
+    (".gif", ".png", ".apng", ".webp", ".jpg", ".jpeg"))}
 
 # 傳給 Discord 的檔案大小上限（bytes）。預設伺服器的上限是 10 MiB，扣掉一點給表單格式的額外開銷
 DISCORD_UPLOAD_LIMIT: int = 10 * 1024 * 1024 - 64 * 1024
@@ -53,6 +69,7 @@ class StickerItem:
         name (str): 顯示名稱（不含副檔名）。
         series (str): 所屬系列（貼圖在哪個子資料夾；直接放在根目錄時為空字串）。
         meta (StickerMeta | None): LINE 貼圖下載器記錄的資訊（預設文字、可自訂文字）；沒有時為 None。
+        tags (StickerTags | None): ``sticker_keywords.json`` 裡的圖上文字與關鍵字；沒有時為 None。
     """
 
     key: str
@@ -60,6 +77,7 @@ class StickerItem:
     name: str
     series: str
     meta: StickerMeta | None = None
+    tags: StickerTags | None = None
 
     @property
     def text_spec(self) -> TextSpec | None:
@@ -146,14 +164,20 @@ def scan_stickers(folder: Path) -> list[StickerItem]:
         dirs[:] = [d for d in dirs if not d.startswith(".") and d != AUX_DIR_NAME]
         series = Path(current).relative_to(folder).as_posix()
         series = "" if series == "." else series
-        metas = load_series_meta(Path(current)) if "line_meta.json" in names else {}
+        metas = load_series_meta(Path(current)) if META_FILENAME in names else {}
+        tags = load_series_tags(Path(current)) if TAGS_FILENAME in names else {}
+        picks: dict[str, str] = {}
         for filename in names:
             stem, ext = os.path.splitext(filename)
             if ext.lower() not in STICKER_EXTENSIONS or stem.endswith(_SKIP_SUFFIXES):
                 continue
+            old = picks.get(stem)
+            if old is None or _FORMAT_PREFERENCE[ext.lower()] < _FORMAT_PREFERENCE[os.path.splitext(old)[1].lower()]:
+                picks[stem] = filename
+        for stem, filename in picks.items():
             key = f"{series}/{filename}" if series else filename
             items.append(StickerItem(key=key, path=Path(current) / filename, name=stem, series=series,
-                                     meta=metas.get(stem)))
+                                     meta=metas.get(stem), tags=tags.get(stem)))
     items.sort(key=lambda it: (natural_key(it.series), natural_key(it.name)))
     return items
 
